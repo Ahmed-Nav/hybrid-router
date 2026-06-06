@@ -5,7 +5,7 @@ pydantic==2.13.4
 python-multipart==0.0.27
 
 # Core AI Routing & Privacy
-semantic-router>=0.1.20
+semantic-router==0.1.15
 sentence-transformers==5.4.1
 presidio-analyzer==2.2.353
 spacy==3.7.4
