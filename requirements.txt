@@ -1,0 +1,19 @@
+# Web Framework
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+python-multipart==0.0.27
+
+# Core AI Routing & Privacy
+semantic-router==0.0.32
+sentence-transformers==5.4.1
+presidio-analyzer==2.2.353
+spacy==3.7.4
+
+# API Clients & Environment
+groq==0.37.1
+python-dotenv==1.2.2
+
+# Telemetry (Local Only, but needed for build)
+arize-phoenix==15.4.0
+opentelemetry-instrumentation-fastapi
