@@ -13,7 +13,3 @@ spacy==3.7.4
 # API Clients & Environment
 groq==0.37.1
 python-dotenv==1.2.2
-
-# Telemetry (Local Only, but needed for build)
-arize-phoenix==15.4.0
-opentelemetry-instrumentation-fastapi
