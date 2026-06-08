@@ -87,10 +87,20 @@ async def generate_live_stream(user_prompt: str, target_model: str):
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         yield "data: [DONE]\n\n"
 
+from fastapi import Security, Depends
+from fastapi.security.api_key import APIKeyHeader
+
+API_KEY = os.environ.get("GATEWAY_API_KEY") # You will add this to Hugging Face Secrets
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header
+    raise HTTPException(status_code=403, detail="Could not validate credentials")
 # ---------------------------------------------------------
 # Main Gateway Proxy Endpoint
 # ---------------------------------------------------------
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(get_api_key)])
 async def create_chat_completion(request: ChatCompletionRequest):
     # Guard check: Ensure the router has finished loading in the background
     if router.sr is None:
