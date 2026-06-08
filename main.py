@@ -1,3 +1,4 @@
+from database import log_request
 import os
 import time
 import json
@@ -141,5 +142,24 @@ async def create_chat_completion(request: ChatCompletionRequest):
         response = await groq_client.chat.completions.create(
             model=target_model,
             messages=[{"role": "user", "content": user_prompt}]
+        )
+        
+        prompt_tokens = response.usage.prompt_tokens
+        completion_tokens = response.usage.completion_tokens
+        
+        # Calculate cost based on Groq pricing (per 1M tokens)
+        # llama-3.1-8b-instant: Prompt $0.05/M, Completion $0.08/M
+        # llama-3.3-70b-versatile: Prompt $0.59/M, Completion $0.79/M
+        if target_model == "llama-3.1-8b-instant":
+            cost = (prompt_tokens * 0.05 + completion_tokens * 0.08) / 1_000_000
+        else:
+            cost = (prompt_tokens * 0.59 + completion_tokens * 0.79) / 1_000_000
+
+        log_request(
+            tenant_id="client_abc",
+            model=target_model,
+            p_tokens=prompt_tokens,
+            c_tokens=completion_tokens,
+            cost=cost
         )
         return response.model_dump()
