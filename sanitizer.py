@@ -1,32 +1,38 @@
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-print("🛡️ [SYSTEM] Initializing PII Sanitizer Shield...")
-# Initialize the local Presidio engine
-analyzer = AnalyzerEngine()
+print("🛡️ [SYSTEM] Configuring PII Sanitizer Shield...")
+
+# 1. Force Presidio to use the lightweight 'sm' model instead of downloading the 'lg' model
+configuration = {
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+}
+
+# 2. Apply the configuration
+provider = NlpEngineProvider(nlp_configuration=configuration)
+nlp_engine_custom = provider.create_engine()
+
+# 3. Initialize the analyzer with the fast engine
+analyzer = AnalyzerEngine(
+    nlp_engine=nlp_engine_custom, 
+    supported_languages=["en"]
+)
 
 def sanitize_prompt(text: str) -> str:
     """Scans text for sensitive PII and redacts it cleanly."""
     if not text.strip():
         return text
         
-    # Analyze the text for entities like EMAIL, PHONE_NUMBER, CREDIT_CARD, PERSON
     results = analyzer.analyze(
         text=text, 
         language="en", 
         entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "CRYPTO", "US_SSN"]
     )
     
-    # Sort results backward to mutate the string from tail to head without messing up indexes
     mutated_text = text
     for entity in sorted(results, key=lambda x: x.start, reverse=True):
         placeholder = f"[{entity.entity_type}]"
         mutated_text = mutated_text[:entity.start] + placeholder + mutated_text[entity.end:]
         
     return mutated_text
-
-# Quick verification test
-if __name__ == "__main__":
-    test_leak = "My email is developer@example.com and my phone number is 123-456-7890."
-    print("\n--- 🛡️ TESTING PII SANITIZATION ---")
-    print(f"Original: {test_leak}")
-    print(f"Sanitized: {sanitize_prompt(test_leak)}")
