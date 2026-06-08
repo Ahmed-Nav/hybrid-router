@@ -10,6 +10,9 @@ sentence-transformers==5.4.1
 presidio-analyzer==2.2.353
 spacy==3.7.4
 
+# The Explicit SpaCy Model Download (Bypasses the 404 Bug)
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
+
 # API Clients & Environment
 groq==0.37.1
 python-dotenv==1.2.2
