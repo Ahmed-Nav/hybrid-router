@@ -1,3 +1,5 @@
+from database import SessionLocal
+from database import UsageLog
 from database import log_request
 import os
 import time
@@ -7,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from contextlib import asynccontextmanager
+from sqlalchemy import func
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -183,3 +186,21 @@ async def create_chat_completion(request: ChatCompletionRequest):
             cost=cost
         )
         return response.model_dump()
+
+@app.get("/v1/analytics")
+async def get_analytics(tenant_id: str = "client_abc"):
+    db = SessionLocal()
+    try:
+        # Query to calculate total spend and token usage
+        stats = db.query(
+            func.sum(UsageLog.cost_incurred).label("total_cost"),
+            func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens")
+        ).filter(UsageLog.tenant_id == tenant_id).first()
+        
+        return {
+            "tenant_id": tenant_id,
+            "total_spend": round(stats.total_cost or 0, 4),
+            "total_tokens": stats.total_tokens or 0
+        }
+    finally:
+        db.close()
