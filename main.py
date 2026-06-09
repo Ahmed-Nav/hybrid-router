@@ -81,8 +81,20 @@ async def generate_live_stream(user_prompt: str, target_model: str, tenant_id: s
                 p_tokens = chunk.usage.prompt_tokens
                 c_tokens = chunk.usage.completion_tokens
             
+            if not chunk.choices:
+                continue
+
             content_chunk = chunk.choices[0].delta.content or ""
-            payload = { ... } # (Keep your existing payload construction)
+            payload = {
+                "id": "chatcmpl-hybrid",
+                "object": "chat.completion.chunk",
+                "model": target_model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": content_chunk},
+                    "finish_reason": chunk.choices[0].finish_reason
+                }]
+            }
             yield f"data: {json.dumps(payload)}\n\n"
         
         # Calculate cost
