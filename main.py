@@ -63,26 +63,34 @@ class ChatCompletionRequest(BaseModel):
 # ---------------------------------------------------------
 # Asynchronous Live Stream Engine
 # ---------------------------------------------------------
-async def generate_live_stream(user_prompt: str, target_model: str):
+async def generate_live_stream(user_prompt: str, target_model: str, tenant_id: str):
     try:
         subscription = await groq_client.chat.completions.create(
             model=target_model,
             messages=[{"role": "user", "content": user_prompt}],
             stream=True
         )
+        
+        # Track tokens manually for streaming
+        p_tokens = 0
+        c_tokens = 0
+        
         async for chunk in subscription:
+            # Capture usage if Groq provides it in the final chunk
+            if chunk.usage:
+                p_tokens = chunk.usage.prompt_tokens
+                c_tokens = chunk.usage.completion_tokens
+            
             content_chunk = chunk.choices[0].delta.content or ""
-            payload = {
-                "id": "chatcmpl-hybrid",
-                "object": "chat.completion.chunk",
-                "model": target_model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {"content": content_chunk},
-                    "finish_reason": chunk.choices[0].finish_reason
-                }]
-            }
+            payload = { ... } # (Keep your existing payload construction)
             yield f"data: {json.dumps(payload)}\n\n"
+        
+        # Calculate cost
+        cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in target_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
+        
+        # LOG HERE
+        log_request(tenant_id, target_model, p_tokens, c_tokens, cost)
+        
         yield "data: [DONE]\n\n"
     except Exception as e:
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -135,7 +143,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
 
     if request.stream:
         return StreamingResponse(
-            generate_live_stream(user_prompt, target_model), 
+            generate_live_stream(user_prompt, target_model, tenant_id="client_abc"), 
             media_type="text/event-stream"
         )
     else:
