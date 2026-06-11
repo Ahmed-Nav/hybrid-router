@@ -13,6 +13,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 from provider import inference_manager
 import router
 from sanitizer import sanitize_prompt
@@ -100,6 +108,7 @@ async def get_api_key(key: str = Security(api_key_header)):
     raise HTTPException(status_code=403, detail="Invalid credentials")
 
 @app.post("/v1/chat/completions", dependencies=[Depends(get_api_key)])
+@limiter.limit("5/minute")
 async def create_chat_completion(request: ChatCompletionRequest):
     if router.sr is None:
         raise HTTPException(status_code=503, detail="AI Core booting...")
@@ -148,6 +157,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
         return {"status": "success", "data": str(data_content)}
 
 @app.get("/v1/analytics", dependencies=[Depends(get_api_key)])
+@limiter.limit("5/minute")
 async def get_analytics(tenant_id: str = "client_abc"):
     db = SessionLocal()
     try:
