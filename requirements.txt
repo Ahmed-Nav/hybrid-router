@@ -16,6 +16,7 @@ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1
 # API Clients & Environment
 groq==0.37.1
 python-dotenv==1.2.2
+google-generativeai
 
 #Database
 sqlalchemy==2.0.30
