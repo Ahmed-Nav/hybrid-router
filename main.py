@@ -106,32 +106,3 @@ async def get_analytics(tenant_id: str = "client_abc"):
         return {"tenant_id": tenant_id, "total_spend": round(float(stats.total_cost or 0), 4), "total_tokens": int(stats.total_tokens or 0)}
     finally:
         db.close()
-
-@app.get("/v1/debug_keys", dependencies=[Depends(get_api_key)])
-async def debug_keys():
-    import os
-    groq_key = os.environ.get("GROQ_API_KEY")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    return {
-        "GROQ_API_KEY_exists": groq_key is not None,
-        "GROQ_API_KEY_len": len(groq_key) if groq_key else 0,
-        "GROQ_API_KEY_prefix": groq_key[:6] if groq_key else "",
-        "GEMINI_API_KEY_exists": gemini_key is not None,
-        "GEMINI_API_KEY_len": len(gemini_key) if gemini_key else 0,
-        "GEMINI_API_KEY_prefix": gemini_key[:6] if gemini_key else "",
-    }
-
-@app.get("/v1/debug_models", dependencies=[Depends(get_api_key)])
-async def debug_models():
-    try:
-        from provider import inference_manager
-        models = []
-        for m in inference_manager.gemini_client.models.list():
-            models.append({
-                "name": m.name,
-                "display_name": m.display_name,
-                "supported_actions": m.supported_actions
-            })
-        return {"status": "success", "models": models}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}

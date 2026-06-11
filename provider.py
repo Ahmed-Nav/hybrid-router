@@ -42,7 +42,7 @@ class InferenceManager:
                 model=model_name, messages=messages, stream=True
             )
         elif provider == "gemini":
-            gemini_model_name = "gemini-1.5-flash" if "llama" in model_name else model_name
+            gemini_model_name = "gemini-2.5-flash" if "llama" in model_name else model_name
             return await self.gemini_client.aio.models.generate_content_stream(
                 model=gemini_model_name,
                 contents=messages[-1]['content']

@@ -61,7 +61,7 @@ creative_work = Route(
 MODEL_MAPPINGS = {
     "simple_chat": {"model": "llama-3.1-8b-instant", "provider": "groq"},
     "complex_reasoning": {"model": "llama-3.3-70b-versatile", "provider": "groq"},
-    "creative_work": {"model": "gemini-1.5-flash", "provider": "gemini"}
+    "creative_work": {"model": "gemini-2.5-flash", "provider": "gemini"}
 }
 
 def initialize_router():
