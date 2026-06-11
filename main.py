@@ -120,3 +120,18 @@ async def debug_keys():
         "GEMINI_API_KEY_len": len(gemini_key) if gemini_key else 0,
         "GEMINI_API_KEY_prefix": gemini_key[:6] if gemini_key else "",
     }
+
+@app.get("/v1/debug_models", dependencies=[Depends(get_api_key)])
+async def debug_models():
+    try:
+        from provider import inference_manager
+        models = []
+        for m in inference_manager.gemini_client.models.list():
+            models.append({
+                "name": m.name,
+                "display_name": m.display_name,
+                "supported_actions": m.supported_actions
+            })
+        return {"status": "success", "models": models}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
