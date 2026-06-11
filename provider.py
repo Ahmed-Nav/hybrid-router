@@ -19,11 +19,17 @@ class InferenceManager:
         try:
             return await self._call_provider(model_name, messages, provider)
         except Exception as e:
+            primary_error = e
             fallback = self.fallback_chain.get(provider)
             if fallback:
-                print(f"⚠️ [FAILOVER] {provider} failed: {e}. Switching to {fallback}...")
-                # Note: You may need to map your model name if the backup uses a different one
-                return await self._call_provider(model_name, messages, fallback)
+                print(f"⚠️ [FAILOVER] {provider} failed: {primary_error}. Switching to {fallback}...")
+                try:
+                    return await self._call_provider(model_name, messages, fallback)
+                except Exception as fallback_error:
+                    raise RuntimeError(
+                        f"Primary provider ({provider}) failed: {primary_error}. "
+                        f"Failover provider ({fallback}) failed: {fallback_error}."
+                    )
             else:
                 raise e
 
