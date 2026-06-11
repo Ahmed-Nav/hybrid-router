@@ -1,12 +1,12 @@
 # provider.py
 import os
-import google.generativeai as genai
+from google import genai
 from groq import AsyncGroq
 
 class InferenceManager:
     def __init__(self):
         self.groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
-        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        self.gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         
         # Define the fallback chain
         self.fallback_chain = {
@@ -40,8 +40,10 @@ class InferenceManager:
             )
         elif provider == "gemini":
             gemini_model_name = "gemini-1.5-flash" if "llama" in model_name else model_name
-            model = genai.GenerativeModel(gemini_model_name)
-            return await model.generate_content_async(messages[-1]['content'], stream=True)
+            return await self.gemini_client.aio.models.generate_content_stream(
+                model=gemini_model_name,
+                contents=messages[-1]['content']
+            )
         else:
             raise ValueError(f"Provider {provider} not supported.")
 
