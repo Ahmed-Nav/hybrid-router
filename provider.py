@@ -17,17 +17,17 @@ class InferenceManager:
             "gemini": None  # End of the line
         }
 
-    async def get_response(self, model_name, messages, provider):
+    async def get_response(self, model_name, messages, provider, stream=True):
         """Attempts the primary provider, falls back if it fails."""
         try:
-            return await self._call_provider(model_name, messages, provider)
+            return await self._call_provider(model_name, messages, provider, stream)
         except Exception as e:
             primary_error = e
             fallback = self.fallback_chain.get(provider)
             if fallback:
                 print(f"⚠️ [FAILOVER] {provider} failed: {primary_error}. Switching to {fallback}...")
                 try:
-                    return await self._call_provider(model_name, messages, fallback)
+                    return await self._call_provider(model_name, messages, fallback, stream)
                 except Exception as fallback_error:
                     raise RuntimeError(
                         f"Primary provider ({provider}) failed: {primary_error}. "
@@ -36,17 +36,23 @@ class InferenceManager:
             else:
                 raise e
 
-    async def _call_provider(self, model_name, messages, provider):
+    async def _call_provider(self, model_name, messages, provider, stream=True):
         if provider == "groq":
             return await self.groq_client.chat.completions.create(
-                model=model_name, messages=messages, stream=True
+                model=model_name, messages=messages, stream=stream
             )
         elif provider == "gemini":
             gemini_model_name = "gemini-2.5-flash" if "llama" in model_name else model_name
-            return await self.gemini_client.aio.models.generate_content_stream(
-                model=gemini_model_name,
-                contents=messages[-1]['content']
-            )
+            if stream:
+                return await self.gemini_client.aio.models.generate_content_stream(
+                    model=gemini_model_name,
+                    contents=messages[-1]['content']
+                )
+            else:
+                return await self.gemini_client.aio.models.generate_content(
+                    model=gemini_model_name,
+                    contents=messages[-1]['content']
+                )
         else:
             raise ValueError(f"Provider {provider} not supported.")
 
