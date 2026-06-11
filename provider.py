@@ -6,7 +6,7 @@ from groq import AsyncGroq
 class InferenceManager:
     def __init__(self):
         self.groq_client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
-        self.gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        self.gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"), http_options={"api_version": "v1"})
         
         # Define the fallback chain
         self.fallback_chain = {
