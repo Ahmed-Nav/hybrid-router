@@ -33,8 +33,8 @@ class InferenceManager:
                 model=model_name, messages=messages, stream=True
             )
         elif provider == "gemini":
-            model = genai.GenerativeModel(model_name)
-            # Gemini generation returns an async generator
+            gemini_model_name = "gemini-1.5-flash" if "llama" in model_name else model_name
+            model = genai.GenerativeModel(gemini_model_name)
             return await model.generate_content_async(messages[-1]['content'], stream=True)
         else:
             raise ValueError(f"Provider {provider} not supported.")

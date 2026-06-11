@@ -48,6 +48,16 @@ safety_block = Route(
     ],
 )
 
+creative_work = Route(
+    name="creative_work",
+    utterances=[
+        "write a creative story about a robot",
+        "generate a blog post idea",
+        "write a poem about technology",
+        "create a catchy marketing slogan",
+    ],
+)
+
 MODEL_MAPPINGS = {
     "simple_chat": {"model": "llama-3.1-8b-instant", "provider": "groq"},
     "complex_reasoning": {"model": "llama-3.3-70b-versatile", "provider": "groq"},
@@ -64,7 +74,7 @@ def initialize_router():
     encoder._model.eval()
     
     print("🧠 [SYSTEM] Compiling Route Layer...")
-    routes = [simple_chat, complex_reasoning, safety_block]
+    routes = [simple_chat, complex_reasoning, safety_block, creative_work]
     
     # Inject the compiled router into the global variable
     sr = SemanticRouter(encoder=encoder, routes=routes, auto_sync="local", aggregation="max")
