@@ -2,7 +2,7 @@ from database import SessionLocal, UsageLog, log_request
 import os
 import time
 import json
-from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi import FastAPI, HTTPException, Security, Depends, Request
 from fastapi.responses import StreamingResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
@@ -113,11 +113,11 @@ async def get_api_key(key: str = Security(api_key_header)):
 
 @app.post("/v1/chat/completions", dependencies=[Depends(get_api_key)])
 @limiter.limit("5/minute")
-async def create_chat_completion(request: ChatCompletionRequest):
+async def create_chat_completion(request: Request, payload: ChatCompletionRequest):
     if router.sr is None:
         raise HTTPException(status_code=503, detail="AI Core booting...")
 
-    user_prompt = sanitize_prompt(request.messages[-1].content)
+    user_prompt = sanitize_prompt(payload.messages[-1].content)
     route_choice = router.sr(user_prompt)
     matched_route = route_choice.name if route_choice.name else "complex_reasoning"
     
@@ -127,7 +127,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
     if matched_route == "safety_block":
         return StreamingResponse(iter(["data: [BLOCKED]\n\n"]), media_type="text/event-stream")
 
-    if request.stream:
+    if payload.stream:
         return StreamingResponse(
             generate_live_stream(user_prompt, mapping["model"], mapping["provider"], "client_abc"), 
             media_type="text/event-stream"
@@ -161,7 +161,6 @@ async def create_chat_completion(request: ChatCompletionRequest):
         return {"status": "success", "data": str(data_content)}
 
 @app.get("/v1/analytics", dependencies=[Depends(get_api_key)])
-@limiter.limit("5/minute")
 async def get_analytics(tenant_id: str = "client_abc"):
     db = SessionLocal()
     try:
