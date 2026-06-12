@@ -148,13 +148,20 @@ async def create_chat_completion(
     print(f"[ROUTER] Decision: {matched_route.upper()} (Overhead: {routing_latency:.2f}ms | Tenant Mode: {tenant_mode})")
     
     mapping = router.MODEL_MAPPINGS.get(matched_route, {"model": "llama-3.3-70b-versatile", "provider": "groq"})
-    
+
+    # Tier Enforcement: Non-premium tenants cannot access advanced inference models.
+    # We automatically demote their route to the basic track unless they explicitly requested a premium model.
     if mapping["provider"] == "gemini" or "70b" in mapping["model"]:
         if tenant.plan_tier != "PREMIUM":
-            raise HTTPException(
-                status_code=402, 
-                detail="Payment Required: Upgrade to Premium to unlock advanced inference tiers."
-            )
+            if payload.model not in ["hybrid-gateway", "default", "", None]:
+                raise HTTPException(
+                    status_code=402, 
+                    detail="Payment Required: Upgrade to Premium to unlock advanced inference tiers."
+                )
+            else:
+                matched_route = "simple_chat"
+                mapping = router.MODEL_MAPPINGS.get(matched_route)
+                print(f"🔶 [TIER ENFORCEMENT] Demoting route to Simple Chat for BASIC tier: {tenant.id}")
 
     if matched_route == "safety_block":
         return StreamingResponse(iter(["data: [BLOCKED]\n\n"]), media_type="text/event-stream")
