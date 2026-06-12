@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from database import SessionLocal, UsageLog, log_request, Tenant
+from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key
 import os
 import time
 import json
@@ -17,11 +17,9 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 def get_rate_limit_key(request: Request) -> str:
-    # Rate limit by API Key first so proxy IP changes on HF don't bypass the limit
     api_key = request.headers.get("X-API-Key")
     if api_key:
-        return api_key
-    # Fallback to forwarded IP or client IP
+        return hash_api_key(api_key) # Limit by fingerprint safely
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -29,7 +27,6 @@ def get_rate_limit_key(request: Request) -> str:
         return request.client.host
     return "127.0.0.1"
 
-# 1. Create Limiter
 limiter = Limiter(key_func=get_rate_limit_key)
 
 from provider import inference_manager
@@ -38,15 +35,12 @@ from sanitizer import sanitize_prompt
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🌐 [GATEWAY] Booting...")
+    print("🌐 [GATEWAY] Booting Core Systems...")
     router.initialize_router()
     yield
-    print("🛑 [GATEWAY] Shutting down.")
+    print("🛑 [GATEWAY] Offline.")
 
-# 2. Instantiate FastAPI
 app = FastAPI(title="Hybrid Semantic Router API", lifespan=lifespan)
-
-# 3. Configure Rate Limiter
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -62,7 +56,6 @@ class ChatCompletionRequest(BaseModel):
 
 async def generate_live_stream(user_prompt: str, target_model: str, target_provider: str, tenant_id: str):
     try:
-        # Use the dynamic provider manager
         response = await inference_manager.get_response(
             model_name=target_model,
             messages=[{"role": "user", "content": user_prompt}],
@@ -78,9 +71,7 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
         async for chunk in response:
             content = ""
             if hasattr(chunk, "choices"):
-                # Groq / OpenAI format
                 actual_provider = "groq"
-                actual_model = target_model
                 if getattr(chunk, "usage", None):
                     p_tokens = chunk.usage.prompt_tokens
                     c_tokens = chunk.usage.completion_tokens
@@ -88,7 +79,6 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
                     continue
                 content = chunk.choices[0].delta.content or ""
             else:
-                # Gemini format
                 actual_provider = "gemini"
                 actual_model = "gemini-2.5-flash" if "llama" in target_model else target_model
                 if getattr(chunk, "usage_metadata", None):
@@ -104,10 +94,9 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
             }
             yield f"data: {json.dumps(payload)}\n\n"
         
-        # Calculate cost based on actual provider and model
         if actual_provider == "groq":
             cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in actual_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
-        else: # gemini
+        else:
             cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
             
         log_request(tenant_id, actual_model, p_tokens, c_tokens, cost)
@@ -121,7 +110,8 @@ api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 async def get_authenticated_tenant(key: str = Security(api_key_header)):
     db = SessionLocal()
     try:
-        tenant = db.query(Tenant).filter(Tenant.api_key == key, Tenant.is_active == True).first()
+        hashed_key = hash_api_key(key)
+        tenant = db.query(Tenant).filter(Tenant.api_key == hashed_key, Tenant.is_active == True).first()
         if not tenant:
             raise HTTPException(status_code=403, detail="Invalid or deactivated credentials.")
         return tenant
@@ -160,7 +150,6 @@ async def create_chat_completion(
             media_type="text/event-stream"
         )
     else:
-        # Standard non-streamed response
         response = await inference_manager.get_response(
             model_name=mapping["model"],
             messages=[{"role": "user", "content": user_prompt}],
@@ -168,16 +157,13 @@ async def create_chat_completion(
             stream=False
         )
         
-        # Deduce response formatting dynamically
         if hasattr(response, "choices"):
-            # Groq / OpenAI format
             content = response.choices[0].message.content
             p_tokens = response.usage.prompt_tokens if getattr(response, "usage", None) else 0
             c_tokens = response.usage.completion_tokens if getattr(response, "usage", None) else 0
             actual_model = mapping["model"]
             cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in actual_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
         else:
-            # Gemini format
             content = response.text
             p_tokens = response.usage_metadata.prompt_token_count if getattr(response, "usage_metadata", None) else 0
             c_tokens = response.usage_metadata.candidates_token_count if getattr(response, "usage_metadata", None) else 0
@@ -187,10 +173,8 @@ async def create_chat_completion(
         log_request(tenant.id, actual_model, p_tokens, c_tokens, cost)
         return {"status": "success", "data": str(content)}
 
-
 @app.get("/v1/analytics")
 async def get_analytics(tenant: Tenant = Depends(get_authenticated_tenant)):
-    """Enforces absolute privacy. Uses the identity tied to the key directly."""
     db = SessionLocal()
     try:
         stats = db.query(
