@@ -17,15 +17,16 @@ class InferenceManager:
             "gemini": None  # End of the line
         }
 
-    async def get_response(self, model_name, messages, provider, stream=True):
-        """Attempts the primary provider, falls back if it fails."""
+    async def get_response(self, model_name, messages, provider, fallback_provider="gemini", stream=True):
+        """Attempts the primary provider, falls back dynamically if it crashes."""
         try:
             return await self._call_provider(model_name, messages, provider, stream)
         except Exception as e:
             primary_error = e
-            fallback = self.fallback_chain.get(provider)
+            fallback = fallback_provider if provider != fallback_provider else None
+            
             if fallback:
-                print(f"⚠️ [FAILOVER] {provider} failed: {primary_error}. Switching to {fallback}...")
+                print(f"⚠️ [FAILOVER ENGINE] {provider} failed: {primary_error}. Routing backup to {fallback}...")
                 try:
                     return await self._call_provider(model_name, messages, fallback, stream)
                 except Exception as fallback_error:

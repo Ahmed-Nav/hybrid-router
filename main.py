@@ -54,7 +54,7 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = 0.7
     stream: Optional[bool] = False
 
-async def generate_live_stream(user_prompt: str, target_model: str, target_provider: str, tenant_id: str):
+async def generate_live_stream(user_prompt: str, target_model: str, target_provider: str, fallback_provider: str, tenant_id: str):
     try:
         response = await inference_manager.get_response(
             model_name=target_model,
@@ -129,8 +129,23 @@ async def create_chat_completion(
         raise HTTPException(status_code=503, detail="AI Core booting...")
 
     user_prompt = sanitize_prompt(payload.messages[-1].content)
-    route_choice = router.sr(user_prompt)
-    matched_route = route_choice.name if route_choice.name else "complex_reasoning"
+    start_time = time.time()
+    
+    tenant_mode = tenant.routing_mode.upper() if tenant.routing_mode else "SMART"
+    
+    if tenant_mode == "PERFORMANCE":
+        matched_route = "complex_reasoning"
+        print(f"🔵 [LLM OPTION] Performance Mode Active. Short-circuiting directly to Premium Track.")
+    else:
+        route_choice = router.sr(user_prompt)
+        matched_route = route_choice.name if route_choice.name else "complex_reasoning"
+        
+        if tenant_mode == "ECO" and matched_route == "complex_reasoning":
+            matched_route = "simple_chat"
+            print(f"🟢 [LLM OPTION] Eco Mode Active. Demoting unclassified route to Simple Chat for max savings.")
+
+    routing_latency = (time.time() - start_time) * 1000
+    print(f"[ROUTER] Decision: {matched_route.upper()} (Overhead: {routing_latency:.2f}ms | Tenant Mode: {tenant_mode})")
     
     mapping = router.MODEL_MAPPINGS.get(matched_route, {"model": "llama-3.3-70b-versatile", "provider": "groq"})
     
@@ -146,7 +161,13 @@ async def create_chat_completion(
 
     if payload.stream:
         return StreamingResponse(
-            generate_live_stream(user_prompt, mapping["model"], mapping["provider"], tenant.id), 
+            generate_live_stream(
+                user_prompt=user_prompt, 
+                target_model=mapping["model"], 
+                target_provider=mapping["provider"], 
+                fallback_provider=tenant.fallback_provider,
+                tenant_id=tenant.id
+            ), 
             media_type="text/event-stream"
         )
     else:
@@ -154,6 +175,7 @@ async def create_chat_completion(
             model_name=mapping["model"],
             messages=[{"role": "user", "content": user_prompt}],
             provider=mapping["provider"],
+            fallback_provider=tenant.fallback_provider, # Added
             stream=False
         )
         
