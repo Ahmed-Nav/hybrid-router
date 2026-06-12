@@ -1,3 +1,4 @@
+from sqlalchemy import Boolean
 import os
 from sqlalchemy import Column, Integer, String, Float, DateTime, create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -20,6 +21,14 @@ class UsageLog(Base):
     completion_tokens = Column(Integer)
     cost_incurred = Column(Float)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+    id = Column(String, primary_key=True, index=True) 
+    api_key = Column(String, unique=True, index=True) 
+    plan_tier = Column(String, default="BASIC")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 # Ensure table exists
 Base.metadata.create_all(bind=engine)

@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from database import SessionLocal, UsageLog, log_request
+from database import SessionLocal, UsageLog, log_request, Tenant
 import os
 import time
 import json
@@ -116,16 +116,25 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
         yield "data: [DONE]\n\n"
 
-API_KEY = os.environ.get("GATEWAY_API_KEY")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
-async def get_api_key(key: str = Security(api_key_header)):
-    if key == API_KEY: return key
-    raise HTTPException(status_code=403, detail="Invalid credentials")
+async def get_authenticated_tenant(key: str = Security(api_key_header)):
+    db = SessionLocal()
+    try:
+        tenant = db.query(Tenant).filter(Tenant.api_key == key, Tenant.is_active == True).first()
+        if not tenant:
+            raise HTTPException(status_code=403, detail="Invalid or deactivated credentials.")
+        return tenant
+    finally:
+        db.close()
 
-@app.post("/v1/chat/completions", dependencies=[Depends(get_api_key)])
-@limiter.limit("5/minute")
-async def create_chat_completion(request: Request, payload: ChatCompletionRequest):
+@app.post("/v1/chat/completions")
+@limiter.limit("60/minute") 
+async def create_chat_completion(
+    request: Request,
+    payload: ChatCompletionRequest, 
+    tenant: Tenant = Depends(get_authenticated_tenant)
+):
     if router.sr is None:
         raise HTTPException(status_code=503, detail="AI Core booting...")
 
@@ -133,50 +142,67 @@ async def create_chat_completion(request: Request, payload: ChatCompletionReques
     route_choice = router.sr(user_prompt)
     matched_route = route_choice.name if route_choice.name else "complex_reasoning"
     
-    # DYNAMIC CONFIG LOOKUP
     mapping = router.MODEL_MAPPINGS.get(matched_route, {"model": "llama-3.3-70b-versatile", "provider": "groq"})
     
+    if mapping["provider"] == "gemini" or "70b" in mapping["model"]:
+        if tenant.plan_tier != "PREMIUM":
+            raise HTTPException(
+                status_code=402, 
+                detail="Payment Required: Upgrade to Premium to unlock advanced inference tiers."
+            )
+
     if matched_route == "safety_block":
         return StreamingResponse(iter(["data: [BLOCKED]\n\n"]), media_type="text/event-stream")
 
     if payload.stream:
         return StreamingResponse(
-            generate_live_stream(user_prompt, mapping["model"], mapping["provider"], "client_abc"), 
+            generate_live_stream(user_prompt, mapping["model"], mapping["provider"], tenant.id), 
             media_type="text/event-stream"
         )
     else:
         # Standard non-streamed response
         response = await inference_manager.get_response(
-            model_name=mapping["model"], 
-            messages=[{"role":"user", "content": user_prompt}], 
+            model_name=mapping["model"],
+            messages=[{"role": "user", "content": user_prompt}],
             provider=mapping["provider"],
             stream=False
         )
         
-        # Safely parse the response depending on what object was returned
+        # Deduce response formatting dynamically
         if hasattr(response, "choices"):
-            # Groq
-            data_content = response.choices[0].message.content
+            # Groq / OpenAI format
+            content = response.choices[0].message.content
             p_tokens = response.usage.prompt_tokens if getattr(response, "usage", None) else 0
             c_tokens = response.usage.completion_tokens if getattr(response, "usage", None) else 0
             actual_model = mapping["model"]
             cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in actual_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
         else:
-            # Gemini
-            data_content = response.text
+            # Gemini format
+            content = response.text
             p_tokens = response.usage_metadata.prompt_token_count if getattr(response, "usage_metadata", None) else 0
             c_tokens = response.usage_metadata.candidates_token_count if getattr(response, "usage_metadata", None) else 0
             actual_model = "gemini-2.5-flash" if "llama" in mapping["model"] else mapping["model"]
             cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
             
-        log_request("client_abc", actual_model, p_tokens, c_tokens, cost)
-        return {"status": "success", "data": str(data_content)}
+        log_request(tenant.id, actual_model, p_tokens, c_tokens, cost)
+        return {"status": "success", "data": str(content)}
 
-@app.get("/v1/analytics", dependencies=[Depends(get_api_key)])
-async def get_analytics(tenant_id: str = "client_abc"):
+
+@app.get("/v1/analytics")
+async def get_analytics(tenant: Tenant = Depends(get_authenticated_tenant)):
+    """Enforces absolute privacy. Uses the identity tied to the key directly."""
     db = SessionLocal()
     try:
-        stats = db.query(func.sum(UsageLog.cost_incurred).label("total_cost"), func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens")).filter(UsageLog.tenant_id == tenant_id).first()
-        return {"tenant_id": tenant_id, "total_spend": round(float(stats.total_cost or 0), 4), "total_tokens": int(stats.total_tokens or 0)}
+        stats = db.query(
+            func.sum(UsageLog.cost_incurred).label("total_cost"), 
+            func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens")
+        ).filter(UsageLog.tenant_id == tenant.id).first()
+        
+        return {
+            "tenant_id": tenant.id,
+            "plan_tier": tenant.plan_tier,
+            "total_spend": round(float(stats.total_cost or 0), 4),
+            "total_tokens": int(stats.total_tokens or 0)
+        }
     finally:
         db.close()
