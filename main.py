@@ -384,6 +384,8 @@ async def create_chat_completion(
             fallback_provider=tenant.fallback_provider,
             stream=False
         )
+
+        actual_provider = "gemini"
         
         if actual_provider != planned_provider:
             print(f"⚠️ [GATEWAY INCIDENT] Primary Provider '{planned_provider}' failed. Triggering automatic cluster failover.")
