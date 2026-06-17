@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key
+from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key, provision_new_tenant
 import os
 import time
 import json
@@ -130,6 +130,88 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 120
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+class StripeCustomer(BaseModel):
+    id: str
+    email: str
+    description: Optional[str] = None
+
+class StripeObject(BaseModel):
+    customer: str
+    amount_total: int
+    currency: str
+    custom_fields: Optional[List[dict]] = None
+
+class StripeData(BaseModel):
+    object: StripeObject
+
+class StripeWebhookPayload(BaseModel):
+    id: str
+    type: str
+    data: StripeData
+
+# ---------------------------------------------------------
+# NEW: UN-AUTHENTICATED STRIPE WEBHOOK INGESTION ENGINE
+# ---------------------------------------------------------
+@app.post("/v1/webhooks/stripe")
+async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: Request):
+    """
+    Asynchronous transaction processing node that listens to 
+    successful checkout events to scale provisioning automatically.
+    """
+    # Security Validation Guard (Simulating Stripe Signature Check)
+    stripe_signature = request.headers.get("Stripe-Signature")
+    if not stripe_signature:
+        # For development validation; switch to strict enforcement in production cloud environments
+        print("⚠️ [WEBHOOK WARNING] Inbound webhook event arrived without explicit validation signature header.")
+
+    # Process only successful checkout sessions
+    if payload.type == "checkout.session.completed":
+        session_data = payload.data.object
+        
+        # Determine organizational parameters from metadata or customer tags
+        # For testing automation, convert standard customer emails into structured IDs safely
+        customer_identifier = f"org_{payload.id[:8]}"
+        
+        # Infer plan tier levels using invoice financial thresholds (e.g., $100+ matches Premium)
+        inferred_tier = "PREMIUM" if session_data.amount_total >= 10000 else "BASIC"
+        
+        db = SessionLocal()
+        try:
+            # Check if tenant exists to prevent transaction unique constraints collisions
+            existing_tenant = db.query(Tenant).filter(Tenant.id == customer_identifier).first()
+            if existing_tenant:
+                return {"status": "skipped", "reason": f"Organization {customer_identifier} already initialized."}
+            
+            # Programmatically provision infrastructure records and retrieve raw key strings
+            generated_live_key = provision_new_tenant(
+                db_session=db, 
+                tenant_id=customer_identifier, 
+                plan_tier=inferred_tier
+            )
+            
+            # -----------------------------------------------------------------
+            # ENTERPRISE EXTENSION NOTE: (Task 6.3 Notification Loop Hook)
+            # This is exactly where you invoke background mail task clients 
+            # (e.g., SendGrid/Boto3 SES) to dispatch the live token:
+            # print(f"✉️ Outbound Welcome Mail transmitted containing key: {generated_live_key}")
+            # -----------------------------------------------------------------
+            
+            return {
+                "status": "success",
+                "provisioned_id": customer_identifier,
+                "assigned_tier": inferred_tier,
+                "allocated_credentials_vector": generated_live_key
+            }
+            
+        except Exception as e:
+            db.rollback()
+            print(f"🚨 [WEBHOOK CRITICAL ERROR] Pipeline failed programmatically processing order tracking data: {str(e)}")
+            raise HTTPException(status_code=500, detail="Automated account onboarding transaction aborted.")
+        finally:
+            db.close()
+            
+    return {"status": "ignored", "message": "Unhandled operational event hook type string signature structure."}
 
 @app.post("/v1/auth/login")
 async def login_dashboard_session(payload: LoginRequest):

@@ -72,3 +72,30 @@ def log_request(tenant_id, model, p_tokens, c_tokens, cost):
         db.commit()
     finally:
         db.close()
+
+import secrets
+
+def provision_new_tenant(db_session, tenant_id: str, plan_tier: str) -> str:
+    """
+    Programmatically creates a new B2B customer profile and generates 
+    a unique, cryptographically secure root API key.
+    """
+    # 1. Generate a secure random token identifier string
+    raw_secret_key = f"sk_live_{secrets.token_hex(16)}"
+    hashed_key = hash_api_key(raw_secret_key)
+    
+    # 2. Inject a new tenant entry into the relational schema
+    new_tenant = Tenant(
+        id=tenant_id,
+        api_key=hashed_key,
+        plan_tier=plan_tier.upper(),
+        routing_mode="SMART",  # High-ROI default routing protocol
+        fallback_provider="groq",
+        is_active=True
+    )
+    
+    db_session.add(new_tenant)
+    db_session.commit()
+    
+    print(f"📦 [PROVISIONER] Programmatically deployed tenant profile: {tenant_id} ({plan_tier})")
+    return raw_secret_key
