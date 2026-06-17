@@ -16,6 +16,11 @@ from sqlalchemy import func
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+import jwt
+from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordBearer
+from database import User, hash_password
+
 def get_rate_limit_key(request: Request) -> str:
     api_key = request.headers.get("X-API-Key")
     if api_key:
@@ -118,6 +123,57 @@ async def get_authenticated_tenant(key: str = Security(api_key_header)):
     finally:
         db.close()
 
+JWT_SECRET = os.environ.get("JWT_SECRET", "SUPER_SECRET_NEOBRUTALIST_KEY_2026")
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 120
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/v1/auth/login")
+async def login_dashboard_session(payload: LoginRequest):
+    db = SessionLocal()
+    try:
+        # 1. Encrypt incoming password to compare with database hash
+        incoming_hash = hash_password(payload.password)
+        
+        # 2. Query matching identity
+        user = db.query(User).filter(
+            User.username == payload.username,
+            User.password_hash == incoming_hash
+        ).first()
+        
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid operator identity or password alignment.")
+        
+        # 3. Construct JWT Payload with explicit claims
+        token_expiry = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        token_claims = {
+            "sub": user.username,
+            "role": user.role,
+            "tenant_id": user.tenant_id,
+            "exp": token_expiry
+        }
+        
+        # 4. Sign token cryptographically
+        access_token = jwt.encode(token_claims, JWT_SECRET, algorithm=JWT_ALGORITHM)
+        
+        print(f"🔒 [AUTH] Issued short-lived JWT session token for operator: {user.username} ({user.role})")
+        
+        return {
+            "status": "success",
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_info": {
+                "username": user.username,
+                "role": user.role,
+                "tenant_id": user.tenant_id
+            }
+        }
+    finally:
+        db.close()
+
 @app.post("/v1/chat/completions")
 @limiter.limit("60/minute") 
 async def create_chat_completion(
@@ -149,8 +205,6 @@ async def create_chat_completion(
     
     mapping = router.MODEL_MAPPINGS.get(matched_route, {"model": "llama-3.3-70b-versatile", "provider": "groq"})
 
-    # Tier Enforcement: Non-premium tenants cannot access advanced inference models.
-    # We automatically demote their route to the basic track unless they explicitly requested a premium model.
     if mapping["provider"] == "gemini" or "70b" in mapping["model"]:
         if tenant.plan_tier != "PREMIUM":
             if payload.model not in ["hybrid-gateway", "default", "", None]:

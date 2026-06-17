@@ -10,6 +10,7 @@ sentence-transformers==5.4.1
 presidio-analyzer==2.2.353
 spacy==3.7.4
 slowapi
+pyjwt
 
 # The Explicit SpaCy Model Download (Bypasses the 404 Bug)
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
