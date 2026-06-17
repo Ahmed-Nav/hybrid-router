@@ -20,7 +20,9 @@ class InferenceManager:
     async def get_response(self, model_name, messages, provider, fallback_provider="gemini", stream=True):
         """Attempts the primary provider, falls back dynamically if it crashes."""
         try:
-            return await self._call_provider(model_name, messages, provider, stream)
+            res = await self._call_provider(model_name, messages, provider, stream)
+            actual_model = "gemini-2.5-flash" if (provider == "gemini" and "llama" in model_name) else model_name
+            return res, provider, actual_model
         except Exception as e:
             primary_error = e
             fallback = fallback_provider if provider != fallback_provider else None
@@ -28,7 +30,9 @@ class InferenceManager:
             if fallback:
                 print(f"⚠️ [FAILOVER ENGINE] {provider} failed: {primary_error}. Routing backup to {fallback}...")
                 try:
-                    return await self._call_provider(model_name, messages, fallback, stream)
+                    res = await self._call_provider(model_name, messages, fallback, stream)
+                    actual_model = "gemini-2.5-flash" if (fallback == "gemini" and "llama" in model_name) else model_name
+                    return res, fallback, actual_model
                 except Exception as fallback_error:
                     raise RuntimeError(
                         f"Primary provider ({provider}) failed: {primary_error}. "

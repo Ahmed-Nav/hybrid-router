@@ -54,9 +54,23 @@ def hash_api_key(key: str) -> str:
     """Cryptographic fingerprint engine ensuring zero plain-text leaks of consumer API keys."""
     return hashlib.sha256(key.strip().encode('utf-8')).hexdigest()
 
-def hash_password(password: str) -> str:
-    """Encrypts cleartext dashboard credentials for storage isolation."""
-    return hashlib.sha256(password.strip().encode('utf-8')).hexdigest()
+def hash_password(password: str, salt: bytes = None) -> str:
+    """Encrypts cleartext dashboard credentials for storage isolation using PBKDF2."""
+    import secrets
+    if salt is None:
+        salt = secrets.token_bytes(16)
+    pwd_hash = hashlib.pbkdf2_hmac('sha256', password.strip().encode('utf-8'), salt, 100000)
+    return f"{salt.hex()}${pwd_hash.hex()}"
+
+def verify_password(password: str, hashed_value: str) -> bool:
+    """Verifies a plain password against its PBKDF2 salt and hash representation."""
+    try:
+        salt_hex, hash_hex = hashed_value.split('$')
+        salt = bytes.fromhex(salt_hex)
+        new_hash = hashlib.pbkdf2_hmac('sha256', password.strip().encode('utf-8'), salt, 100000)
+        return new_hash.hex() == hash_hex
+    except Exception:
+        return False
 
 def log_request(tenant_id, model, p_tokens, c_tokens, cost):
     db = SessionLocal()
