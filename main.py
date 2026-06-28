@@ -69,10 +69,14 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class StripeCustomerDetails(BaseModel):
+    email: Optional[str] = None
+
 class StripeObject(BaseModel):
     customer: str
     amount_total: int
     currency: str
+    customer_details: Optional[StripeCustomerDetails] = None
     custom_fields: Optional[List[dict]] = None
 
 class StripeData(BaseModel):
@@ -140,7 +144,9 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
 # ---------------------------------------------------------
 # CONSTANTS & CONFIGURATIONS
 # ---------------------------------------------------------
-JWT_SECRET = os.environ.get("JWT_SECRET", "SUPER_SECRET_NEOBRUTALIST_KEY_2026")
+JWT_SECRET = os.environ.get("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("FATAL: JWT_SECRET environment variable is unset. Cannot start application in a secure state.")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 120
 
@@ -195,6 +201,74 @@ async def get_authenticated_tenant(key: str = Security(api_key_header)):
         return tenant
     finally:
         db.close()
+
+async def get_tenant_from_session_or_key(request: Request):
+    db = SessionLocal()
+    try:
+        # 1. Check X-API-Key header first
+        api_key = request.headers.get("X-API-Key")
+        if api_key:
+            hashed_key = hash_api_key(api_key)
+            tenant = db.query(Tenant).filter(Tenant.api_key == hashed_key, Tenant.is_active == True).first()
+            if tenant:
+                db.expunge(tenant)
+                return tenant
+        
+        # 2. Check Authorization header (Bearer token)
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+                tenant_id = payload.get("tenant_id")
+                if tenant_id:
+                    tenant = db.query(Tenant).filter(Tenant.id == tenant_id, Tenant.is_active == True).first()
+                    if tenant:
+                        db.expunge(tenant)
+                        return tenant
+            except jwt.PyJWTError:
+                pass
+                
+        raise HTTPException(status_code=403, detail="Invalid or deactivated credentials.")
+    finally:
+        db.close()
+
+async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: str):
+    resend_api_key = os.environ.get("RESEND_API_KEY")
+    if not resend_api_key:
+        print("⚠️ [EMAIL CLIENT] RESEND_API_KEY is not set. Cannot send token delivery email.")
+        return False
+    
+    url = "https://api.resend.com/emails"
+    headers = {
+        "Authorization": f"Bearer {resend_api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "from": "onboarding@resend.dev",
+        "to": customer_email,
+        "subject": "Your Hybrid Router API Key & Onboarding Details",
+        "html": f"""
+        <h3>Welcome to Hybrid Router!</h3>
+        <p>Your tenant profile <strong>{tenant_id}</strong> has been successfully provisioned.</p>
+        <p>Here is your secure cleartext API Key:</p>
+        <pre style="background-color: #f4f4f4; padding: 10px; border-radius: 5px; font-weight: bold; font-family: monospace;">{api_key}</pre>
+        <p><strong>IMPORTANT:</strong> Guard this key carefully. It will not be shown again.</p>
+        """
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code in [200, 201]:
+                print(f"✉️ [EMAIL CLIENT] Secure token delivered successfully to {customer_email}")
+                return True
+            else:
+                print(f"❌ [EMAIL CLIENT] Failed to send email. Resend response: {response.text}")
+                return False
+    except Exception as e:
+        print(f"⚠️ [EMAIL CLIENT] Exception during email transmission: {str(e)}")
+        return False
 
 # ---------------------------------------------------------
 # PHASE 5: DOWNTIME-FREE IDENTITY GATEWAY ENDPOINTS
@@ -268,15 +342,13 @@ async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: 
     stripe_signature = request.headers.get("Stripe-Signature")
     webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
     
-    if webhook_secret:
-        body = await request.body()
-        if not verify_stripe_signature(body, stripe_signature, webhook_secret):
-            raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature verification.")
-    else:
-        if not stripe_signature:
-            print("⚠️ [WEBHOOK WARNING] Inbound webhook event arrived without validation signature header.")
-        else:
-            print("⚠️ [WEBHOOK WARNING] Stripe-Signature header present but STRIPE_WEBHOOK_SECRET is not configured.")
+    if not webhook_secret:
+        print("🚨 [WEBHOOK CRITICAL] STRIPE_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
+        raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
+    
+    body = await request.body()
+    if not verify_stripe_signature(body, stripe_signature, webhook_secret):
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature verification.")
 
     if payload.type == "checkout.session.completed":
         session_data = payload.data.object
@@ -294,6 +366,12 @@ async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: 
                 tenant_id=customer_identifier, 
                 plan_tier=inferred_tier
             )
+            
+            customer_email = "customer@example.com"
+            if session_data.customer_details and session_data.customer_details.email:
+                customer_email = session_data.customer_details.email
+                
+            await send_provisioning_email(customer_email, customer_identifier, generated_live_key)
             
             return {
                 "status": "success",
@@ -384,8 +462,6 @@ async def create_chat_completion(
             fallback_provider=tenant.fallback_provider,
             stream=False
         )
-
-        actual_provider = "gemini"
         
         if actual_provider != planned_provider:
             print(f"⚠️ [GATEWAY INCIDENT] Primary Provider '{planned_provider}' failed. Triggering automatic cluster failover.")
@@ -425,7 +501,7 @@ async def create_chat_completion(
 # HISTORICAL METRICS ANALYTICS ENDPOINT
 # ---------------------------------------------------------
 @app.get("/v1/analytics")
-async def get_analytics(tenant: Tenant = Depends(get_authenticated_tenant)):
+async def get_analytics(tenant: Tenant = Depends(get_tenant_from_session_or_key)):
     db = SessionLocal()
     try:
         stats = db.query(
@@ -437,7 +513,8 @@ async def get_analytics(tenant: Tenant = Depends(get_authenticated_tenant)):
             "tenant_id": tenant.id,
             "plan_tier": tenant.plan_tier,
             "total_spend": round(float(stats.total_cost or 0), 4),
-            "total_tokens": int(stats.total_tokens or 0)
+            "total_tokens": int(stats.total_tokens or 0),
+            "api_key_hash": tenant.api_key
         }
     finally:
         db.close()

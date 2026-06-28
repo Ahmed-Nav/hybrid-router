@@ -195,11 +195,7 @@ if not st.session_state.authenticated:
                         st.session_state.user_role = user_data["role"]
                         st.session_state.tenant_id = user_data["tenant_id"]
                         
-                        # Populate fallbacks to maintain consistency across telemetry widget calls
-                        if st.session_state.user_role == "SUPER_ADMIN":
-                            st.session_state.api_key = "sk_premium_token_999"
-                        else:
-                            st.session_state.api_key = "sk_premium_token_999" if user_data["tenant_id"] == "enterprise_analytics_gmbh" else "sk_basic_token_111"
+                        st.session_state.api_key = "sk_live_************************"
                         
                         st.success(f"Identity verified! Welcome back, {user_data['username']}.")
                         st.rerun()
@@ -244,8 +240,7 @@ else:
 
     st.title(f"📊 Module Workspace: {workspace_view}")
 
-    # Fetch data safely from gateway backend
-    headers = {"X-API-Key": st.session_state.api_key}
+    headers = {"Authorization": f"Bearer {st.session_state.auth_token}"}
     try:
         analytics_response = requests.get(f"{GATEWAY_URL}/v1/analytics", headers=headers)
         if analytics_response.status_code == 200:
@@ -391,8 +386,8 @@ else:
                 </div>
             ''', unsafe_allow_html=True)
             
-            st.subheader("Active Infrastructure Fingerprints")
-            st.code(f"Active Root Key Fingerprint (SHA-256): {hashlib.sha256(st.session_state.api_key.encode()).hexdigest()}")
+            api_key_hash = metrics_payload.get("api_key_hash", "Not Available")
+            st.code(f"Active Root Key Fingerprint (SHA-256): {api_key_hash}")
             
             st.write("---")
             st.subheader("Provision Additional App Token Identifier")
