@@ -428,7 +428,7 @@ headers = {{
 }}
 payload = {{
     "model": "hybrid-gateway",
-    "messages": [{"role": "user", "content": "How do I implement binary search?"}],
+    "messages": [[{{"role": "user", "content": "How do I implement binary search?"}}]],
     "stream": True
 }}
 

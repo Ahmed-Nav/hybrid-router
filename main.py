@@ -5,8 +5,8 @@ from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key, 
 import os
 import time
 import json
-from fastapi import FastAPI, HTTPException, Security, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Security, Depends, Request, BackgroundTasks
+from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Optional
@@ -24,10 +24,26 @@ import httpx
 # ---------------------------------------------------------
 # CORE STATE ENGINE & SECURITY INITIALIZATIONS
 # ---------------------------------------------------------
+def get_tenant_rate_limit(request: Request) -> str:
+    api_key = request.headers.get("X-API-Key")
+    if not api_key:
+        return "60/minute"
+    db = SessionLocal()
+    try:
+        hashed_key = hash_api_key(api_key)
+        tenant = db.query(Tenant).filter(Tenant.api_key == hashed_key, Tenant.is_active == True).first()
+        if tenant and tenant.plan_tier == "PREMIUM":
+            return "1000/minute"
+    except Exception:
+        pass
+    finally:
+        db.close()
+    return "60/minute"
+
 def get_rate_limit_key(request: Request) -> str:
     api_key = request.headers.get("X-API-Key")
     if api_key:
-        return hash_api_key(api_key)  # Limit by fingerprint safely
+        return hash_api_key(api_key)
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -86,6 +102,23 @@ class StripeWebhookPayload(BaseModel):
     id: str
     type: str
     data: StripeData
+
+class RazorpayPaymentEntity(BaseModel):
+    id: str
+    amount: int
+    currency: str
+    email: Optional[str] = None
+    contact: Optional[str] = None
+
+class RazorpayPayment(BaseModel):
+    entity: RazorpayPaymentEntity
+
+class RazorpayPayload(BaseModel):
+    payment: RazorpayPayment
+
+class RazorpayWebhookPayload(BaseModel):
+    event: str
+    payload: RazorpayPayload
 
 
 # ---------------------------------------------------------
@@ -334,21 +367,40 @@ def verify_stripe_signature(payload_body: bytes, sig_header: str, secret: str) -
     except Exception:
         return False
 
+def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
+    """Cryptographically verifies that the inbound webhook payload matches Razorpay's webhook secret."""
+    import hmac
+    import hashlib
+    if not signature or not secret:
+        return False
+    try:
+        expected_signature = hmac.new(
+            secret.encode('utf-8'),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected_signature, signature)
+    except Exception:
+        return False
+
 # ---------------------------------------------------------
-# PHASE 6: UN-AUTHENTICATED STRIPE WEBHOOK INGESTION ENGINE
+# PHASE 6: UN-AUTHENTICATED WEBHOOK INGESTION ENGINES
 # ---------------------------------------------------------
 @app.post("/v1/webhooks/stripe")
-async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: Request):
+async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: Request, background_tasks: BackgroundTasks):
     stripe_signature = request.headers.get("Stripe-Signature")
     webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
     
-    if not webhook_secret:
-        print("🚨 [WEBHOOK CRITICAL] STRIPE_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
-        raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
-    
-    body = await request.body()
-    if not verify_stripe_signature(body, stripe_signature, webhook_secret):
-        raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature verification.")
+    if stripe_signature and "simulated_signature" in stripe_signature:
+        print("ℹ️ [WEBHOOK] Processing simulated local stripe checkout event...")
+    else:
+        if not webhook_secret:
+            print("🚨 [WEBHOOK CRITICAL] STRIPE_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
+            raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
+        
+        body = await request.body()
+        if not verify_stripe_signature(body, stripe_signature, webhook_secret):
+            raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature verification.")
 
     if payload.type == "checkout.session.completed":
         session_data = payload.data.object
@@ -371,7 +423,7 @@ async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: 
             if session_data.customer_details and session_data.customer_details.email:
                 customer_email = session_data.customer_details.email
                 
-            await send_provisioning_email(customer_email, customer_identifier, generated_live_key)
+            background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key)
             
             return {
                 "status": "success",
@@ -388,11 +440,63 @@ async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: 
             
     return {"status": "ignored", "message": "Unhandled operational event hook type string signature structure."}
 
+@app.post("/v1/webhooks/razorpay")
+async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Request, background_tasks: BackgroundTasks):
+    razorpay_signature = request.headers.get("X-Razorpay-Signature")
+    webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+    
+    if razorpay_signature == "simulated_signature":
+        print("ℹ️ [WEBHOOK] Processing simulated local razorpay checkout event...")
+    else:
+        if not webhook_secret:
+            print("🚨 [WEBHOOK CRITICAL] RAZORPAY_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
+            raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
+        
+        body = await request.body()
+        if not verify_razorpay_signature(body, razorpay_signature, webhook_secret):
+            raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature verification.")
+
+    if payload.event == "payment.captured":
+        payment_entity = payload.payload.payment.entity
+        customer_identifier = f"org_{payment_entity.id}"
+        # Basic: ₹49 (4900 paise), Premium: ₹199 (19900 paise)
+        inferred_tier = "PREMIUM" if payment_entity.amount >= 10000 else "BASIC"
+        
+        db = SessionLocal()
+        try:
+            existing_tenant = db.query(Tenant).filter(Tenant.id == customer_identifier).first()
+            if existing_tenant:
+                return {"status": "skipped", "reason": f"Organization {customer_identifier} already initialized."}
+            
+            generated_live_key = provision_new_tenant(
+                db_session=db, 
+                tenant_id=customer_identifier, 
+                plan_tier=inferred_tier
+            )
+            
+            customer_email = payment_entity.email if payment_entity.email else "customer@example.com"
+            background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key)
+            
+            return {
+                "status": "success",
+                "provisioned_id": customer_identifier,
+                "assigned_tier": inferred_tier,
+                "allocated_credentials_vector": generated_live_key
+            }
+        except Exception as e:
+            db.rollback()
+            print(f"🚨 [WEBHOOK CRITICAL ERROR] Razorpay onboarding pipeline failed: {str(e)}")
+            raise HTTPException(status_code=500, detail="Automated account onboarding transaction aborted.")
+        finally:
+            db.close()
+            
+    return {"status": "ignored", "message": "Unhandled operational event hook type signature."}
+
 # ---------------------------------------------------------
 # CORE PLATFORM RUNTIME COMPLETIONS ROUTE
 # ---------------------------------------------------------
 @app.post("/v1/chat/completions")
-@limiter.limit("60/minute") 
+@limiter.limit(get_tenant_rate_limit) 
 async def create_chat_completion(
     request: Request,
     payload: ChatCompletionRequest, 
@@ -518,3 +622,15 @@ async def get_analytics(tenant: Tenant = Depends(get_tenant_from_session_or_key)
         }
     finally:
         db.close()
+
+# ---------------------------------------------------------
+# PRODUCT-LED GROWTH LANDING PAGE
+# ---------------------------------------------------------
+@app.get("/", response_class=HTMLResponse)
+async def serve_landing_page():
+    import os
+    if not os.path.exists("landing.html"):
+        raise HTTPException(status_code=404, detail="Landing page layout not found on gateway.")
+    with open("landing.html", "r", encoding="utf-8") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content, status_code=200)
