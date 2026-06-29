@@ -9,6 +9,7 @@ semantic-router==0.1.15
 sentence-transformers==5.4.1
 presidio-analyzer==2.2.353
 spacy==3.7.4
+numpy<2.0.0
 slowapi
 pyjwt
 twilio

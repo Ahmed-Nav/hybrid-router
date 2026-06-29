@@ -93,24 +93,6 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
-class StripeCustomerDetails(BaseModel):
-    email: Optional[str] = None
-
-class StripeObject(BaseModel):
-    customer: str
-    amount_total: int
-    currency: str
-    customer_details: Optional[StripeCustomerDetails] = None
-    custom_fields: Optional[List[dict]] = None
-
-class StripeData(BaseModel):
-    object: StripeObject
-
-class StripeWebhookPayload(BaseModel):
-    id: str
-    type: str
-    data: StripeData
-
 class RazorpayPaymentEntity(BaseModel):
     id: str
     amount: int
@@ -274,7 +256,7 @@ async def get_tenant_from_session_or_key(request: Request):
     finally:
         db.close()
 
-async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: str):
+async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: str, temp_password: str = None):
     resend_api_key = os.environ.get("RESEND_API_KEY")
     if not resend_api_key:
         print("⚠️ [EMAIL CLIENT] RESEND_API_KEY is not set. Cannot send token delivery email.")
@@ -285,6 +267,20 @@ async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: 
         "Authorization": f"Bearer {resend_api_key}",
         "Content-Type": "application/json"
     }
+    
+    credentials_section = ""
+    if temp_password:
+        credentials_section = f"""
+        <h4>Operator Control Dashboard Credentials:</h4>
+        <p>Log in to configure failovers, routing modes, and view FinOps ROI analytics:</p>
+        <p>Console URL: <a href="https://hybrid-router.vercel.app/login">https://hybrid-router.vercel.app/login</a></p>
+        <ul>
+            <li><strong>Username:</strong> {customer_email}</li>
+            <li><strong>Password:</strong> <code>{temp_password}</code></li>
+        </ul>
+        <p style="font-size: 0.85em; color: #666;">Note: We recommend changing your password after your initial login.</p>
+        """
+
     payload = {
         "from": "onboarding@resend.dev",
         "to": customer_email,
@@ -295,6 +291,7 @@ async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: 
         <p>Here is your secure cleartext API Key:</p>
         <pre style="background-color: #f4f4f4; padding: 10px; border-radius: 5px; font-weight: bold; font-family: monospace;">{api_key}</pre>
         <p><strong>IMPORTANT:</strong> Guard this key carefully. It will not be shown again.</p>
+        {credentials_section}
         """
     }
     
@@ -342,39 +339,9 @@ async def login_dashboard_session(payload: LoginRequest):
                 "username": user.username,
                 "role": user.role,
                 "tenant_id": user.tenant_id
-            }
-        }
-    finally:
-        db.close()
-
-# ---------------------------------------------------------
+            # ---------------------------------------------------------
 # SECURITY WEBHOOK SIGNATURE VERIFICATION ENGINE
 # ---------------------------------------------------------
-def verify_stripe_signature(payload_body: bytes, sig_header: str, secret: str) -> bool:
-    """Cryptographically verifies that the inbound webhook payload matches Stripe's signing key."""
-    import hmac
-    import hashlib
-    if not sig_header or not secret:
-        return False
-    try:
-        parts = dict(item.split('=') for item in sig_header.split(','))
-        timestamp = parts.get('t')
-        signature = parts.get('v1')
-        
-        if not timestamp or not signature:
-            return False
-            
-        signed_payload = f"{timestamp}.{payload_body.decode('utf-8')}".encode('utf-8')
-        expected_signature = hmac.new(
-            secret.encode('utf-8'),
-            signed_payload,
-            hashlib.sha256
-        ).hexdigest()
-        
-        return hmac.compare_digest(expected_signature, signature)
-    except Exception:
-        return False
-
 def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
     """Cryptographically verifies that the inbound webhook payload matches Razorpay's webhook secret."""
     import hmac
@@ -394,75 +361,18 @@ def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
 # ---------------------------------------------------------
 # PHASE 6: UN-AUTHENTICATED WEBHOOK INGESTION ENGINES
 # ---------------------------------------------------------
-@app.post("/v1/webhooks/stripe")
-async def handle_stripe_billing_webhook(payload: StripeWebhookPayload, request: Request, background_tasks: BackgroundTasks):
-    stripe_signature = request.headers.get("Stripe-Signature")
-    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-    
-    if stripe_signature and "simulated_signature" in stripe_signature:
-        print("ℹ️ [WEBHOOK] Processing simulated local stripe checkout event...")
-    else:
-        if not webhook_secret:
-            print("🚨 [WEBHOOK CRITICAL] STRIPE_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
-            raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
-        
-        body = await request.body()
-        if not verify_stripe_signature(body, stripe_signature, webhook_secret):
-            raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature verification.")
-
-    if payload.type == "checkout.session.completed":
-        session_data = payload.data.object
-        customer_identifier = f"org_{session_data.customer}"
-        inferred_tier = "PREMIUM" if session_data.amount_total >= 10000 else "BASIC"
-        
-        db = SessionLocal()
-        try:
-            existing_tenant = db.query(Tenant).filter(Tenant.id == customer_identifier).first()
-            if existing_tenant:
-                return {"status": "skipped", "reason": f"Organization {customer_identifier} already initialized."}
-            
-            generated_live_key = provision_new_tenant(
-                db_session=db, 
-                tenant_id=customer_identifier, 
-                plan_tier=inferred_tier
-            )
-            
-            customer_email = "customer@example.com"
-            if session_data.customer_details and session_data.customer_details.email:
-                customer_email = session_data.customer_details.email
-                
-            background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key)
-            
-            return {
-                "status": "success",
-                "provisioned_id": customer_identifier,
-                "assigned_tier": inferred_tier,
-                "allocated_credentials_vector": generated_live_key
-            }
-        except Exception as e:
-            db.rollback()
-            print(f"🚨 [WEBHOOK CRITICAL ERROR] Onboarding pipeline failed: {str(e)}")
-            raise HTTPException(status_code=500, detail="Automated account onboarding transaction aborted.")
-        finally:
-            db.close()
-            
-    return {"status": "ignored", "message": "Unhandled operational event hook type string signature structure."}
-
 @app.post("/v1/webhooks/razorpay")
 async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Request, background_tasks: BackgroundTasks):
     razorpay_signature = request.headers.get("X-Razorpay-Signature")
     webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
     
-    if razorpay_signature == "simulated_signature":
-        print("ℹ️ [WEBHOOK] Processing simulated local razorpay checkout event...")
-    else:
-        if not webhook_secret:
-            print("🚨 [WEBHOOK CRITICAL] RAZORPAY_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
-            raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
-        
-        body = await request.body()
-        if not verify_razorpay_signature(body, razorpay_signature, webhook_secret):
-            raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature verification.")
+    if not webhook_secret:
+        print("🚨 [WEBHOOK CRITICAL] RAZORPAY_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
+        raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
+    
+    body = await request.body()
+    if not verify_razorpay_signature(body, razorpay_signature, webhook_secret):
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature verification.")
 
     if payload.event == "payment.captured":
         payment_entity = payload.payload.payment.entity
@@ -476,14 +386,30 @@ async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Requ
             if existing_tenant:
                 return {"status": "skipped", "reason": f"Organization {customer_identifier} already initialized."}
             
+            # 1. Provision new Tenant
             generated_live_key = provision_new_tenant(
                 db_session=db, 
                 tenant_id=customer_identifier, 
                 plan_tier=inferred_tier
             )
             
+            # 2. Provision Admin User
+            import secrets
             customer_email = payment_entity.email if payment_entity.email else "customer@example.com"
-            background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key)
+            temp_password = secrets.token_urlsafe(8)
+            hashed_pw = hash_password(temp_password)
+            
+            new_user = User(
+                username=customer_email,
+                password_hash=hashed_pw,
+                role="TENANT_ADMIN",
+                tenant_id=customer_identifier
+            )
+            db.add(new_user)
+            db.commit()
+            
+            # 3. Schedule email delivery
+            background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key, temp_password)
             
             return {
                 "status": "success",
@@ -497,7 +423,6 @@ async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Requ
             raise HTTPException(status_code=500, detail="Automated account onboarding transaction aborted.")
         finally:
             db.close()
-            
     return {"status": "ignored", "message": "Unhandled operational event hook type signature."}
 
 # ---------------------------------------------------------

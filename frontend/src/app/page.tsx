@@ -1,71 +1,11 @@
 "use client";
 
-import { useState } from "react";
-
-const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7860";
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "https://ahmednav-hybrid-router.hf.space";
 
 export default function Home() {
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [currentTier, setCurrentTier] = useState("BASIC");
-  const [currentAmount, setCurrentAmount] = useState(4900);
-  const [email, setEmail] = useState("test-customer@example.com");
-
   const redirectToPayment = (url: string) => {
-    // Capture event in console (or PostHog if configured)
     console.log(`Redirecting to payment page: ${url}`);
     window.open(url, "_blank");
-  };
-
-  const openSimulator = (tier: string, amount: number) => {
-    setCurrentTier(tier);
-    setCurrentAmount(amount);
-    setIsModalOpen(true);
-  };
-
-  const confirmCheckout = async () => {
-    if (!email) {
-      alert("Please enter an email address.");
-      return;
-    }
-
-    const razorpayPayload = {
-      event: "payment.captured",
-      payload: {
-        payment: {
-          entity: {
-            id: "pay_sim_" + Math.random().toString(36).substring(2, 11),
-            amount: currentAmount,
-            currency: "INR",
-            email: email,
-            contact: "+919999999999",
-          },
-        },
-      },
-    };
-
-    try {
-      const response = await fetch(`${BACKEND_URL}/v1/webhooks/razorpay`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Razorpay-Signature": "simulated_signature",
-        },
-        body: JSON.stringify(razorpayPayload),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        alert(
-          `Success!\n\nRazorpay Checkout Simulated.\nOrganization: ${data.provisioned_id}\nAssigned Tier: ${data.assigned_tier}\n\nCheck your backend console or Resend dashboard to retrieve the cleartext API key.`
-        );
-        setIsModalOpen(false);
-      } else {
-        const errorText = await response.text();
-        alert(`Error completing payment simulator: ${errorText}`);
-      }
-    } catch (err: any) {
-      alert(`Network error connecting to backend gateway: ${err.message}`);
-    }
   };
 
   return (
@@ -112,24 +52,6 @@ export default function Home() {
           <div className="text-center mb-8">
             <h2 className="text-3xl font-extrabold mb-2">B2B Developer SaaS Plans</h2>
             <p className="text-gray-600">Choose a tier to match your application demand and compliance posture.</p>
-            
-            {/* Local Test Harness */}
-            <div className="mt-4 text-sm text-gray-500">
-              ⚙️ Local Test Harness:{" "}
-              <button 
-                onClick={() => openSimulator("BASIC", 4900)} 
-                className="text-[#F28C28] font-bold underline hover:text-[#1E1E1E]"
-              >
-                Simulate Basic Payment
-              </button>{" "}
-              |{" "}
-              <button 
-                onClick={() => openSimulator("PREMIUM", 19900)} 
-                className="text-[#F28C28] font-bold underline hover:text-[#1E1E1E]"
-              >
-                Simulate Premium Payment
-              </button>
-            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
@@ -182,39 +104,6 @@ export default function Home() {
         </div>
 
       </div>
-
-      {/* Checkout Simulation Modal */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex justify-center items-center z-50">
-          <div className="bg-white border-4 border-[#1E1E1E] p-8 w-[90%] max-w-[480px] shadow-[10px_10px_0px_#1E1E1E]">
-            <h3 className="text-2xl font-bold mb-4 font-mono">Simulate Razorpay Checkout</h3>
-            <p className="text-sm text-gray-500 mb-4">
-              Enter your email to simulate a successful Razorpay payment.captured redirection event. A new tenant profile will be created and your API credentials dispatched.
-            </p>
-            <input 
-              type="email" 
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full p-2 border-2 border-[#1E1E1E] mb-6 outline-none"
-              placeholder="email@example.com"
-            />
-            <div className="flex gap-4">
-              <button 
-                onClick={confirmCheckout}
-                className="flex-1 bg-[#F28C28] text-white border-2 border-[#1E1E1E] py-2 font-bold hover:bg-[#1E1E1E] transition duration-150"
-              >
-                Complete Checkout
-              </button>
-              <button 
-                onClick={() => setIsModalOpen(false)}
-                className="flex-1 bg-gray-200 border-2 border-[#1E1E1E] py-2 font-bold hover:bg-gray-300 transition duration-150"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
