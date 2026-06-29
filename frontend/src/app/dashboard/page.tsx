@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7860";
+
 interface UserInfo {
   username: string;
   role: string;
@@ -61,7 +63,7 @@ export default function Dashboard() {
 
   const fetchMetrics = async (authToken: string) => {
     try {
-      const res = await fetch("http://localhost:7860/v1/analytics", {
+      const res = await fetch(`${BACKEND_URL}/v1/analytics`, {
         headers: {
           Authorization: `Bearer ${authToken}`,
         },
@@ -326,7 +328,7 @@ export default function Dashboard() {
 {`import requests
 import json
 
-url = "http://localhost:7860/v1/chat/completions"
+url = "${BACKEND_URL}/v1/chat/completions"
 headers = {
     "X-API-Key": "sk_live_************************",
     "Content-Type": "application/json"
@@ -347,7 +349,7 @@ for line in response.iter_lines():
                 <div>
                   <h4 className="text-sm font-bold mb-2 font-mono">Shell (cURL)</h4>
                   <pre className="bg-[#1E1E1E] text-white p-4 border-2 border-[#1E1E1E] font-mono text-sm overflow-x-auto">
-{`curl -X POST "http://localhost:7860/v1/chat/completions" \\
+{`curl -X POST "${BACKEND_URL}/v1/chat/completions" \\
   -H "X-API-Key: sk_live_************************" \\
   -H "Content-Type: application/json" \\
   -d '{

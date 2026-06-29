@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7860";
+
 export default function Home() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [currentTier, setCurrentTier] = useState("BASIC");
@@ -42,7 +44,7 @@ export default function Home() {
     };
 
     try {
-      const response = await fetch("http://localhost:7860/v1/webhooks/razorpay", {
+      const response = await fetch(`${BACKEND_URL}/v1/webhooks/razorpay`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
