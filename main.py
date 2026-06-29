@@ -339,7 +339,12 @@ async def login_dashboard_session(payload: LoginRequest):
                 "username": user.username,
                 "role": user.role,
                 "tenant_id": user.tenant_id
-            # ---------------------------------------------------------
+            }
+        }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
 # SECURITY WEBHOOK SIGNATURE VERIFICATION ENGINE
 # ---------------------------------------------------------
 def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
