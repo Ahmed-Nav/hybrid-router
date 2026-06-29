@@ -7,6 +7,7 @@ import time
 import json
 from fastapi import FastAPI, HTTPException, Security, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Optional
@@ -65,6 +66,13 @@ async def lifespan(app: FastAPI):
     print("🛑 [GATEWAY] Offline.")
 
 app = FastAPI(title="Hybrid Semantic Router API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -624,13 +632,12 @@ async def get_analytics(tenant: Tenant = Depends(get_tenant_from_session_or_key)
         db.close()
 
 # ---------------------------------------------------------
-# PRODUCT-LED GROWTH LANDING PAGE
+# PLATFORM SYSTEM STATUS ENDPOINT
 # ---------------------------------------------------------
-@app.get("/", response_class=HTMLResponse)
-async def serve_landing_page():
-    import os
-    if not os.path.exists("landing.html"):
-        raise HTTPException(status_code=404, detail="Landing page layout not found on gateway.")
-    with open("landing.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content, status_code=200)
+@app.get("/")
+async def get_system_status():
+    return {
+        "status": "online",
+        "service": "Hybrid Semantic Router API Gateway",
+        "version": "1.0.0"
+    }
