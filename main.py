@@ -158,7 +158,8 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
         else:
             cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
             
-        log_request(tenant_id, actual_model, p_tokens, c_tokens, cost)
+        import asyncio
+        await asyncio.to_thread(log_request, tenant_id, actual_model, p_tokens, c_tokens, cost)
         yield "data: [DONE]\n\n"
     except Exception as e:
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -438,6 +439,7 @@ async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Requ
 async def create_chat_completion(
     request: Request,
     payload: ChatCompletionRequest, 
+    background_tasks: BackgroundTasks,
     tenant: Tenant = Depends(get_authenticated_tenant)
 ):
     if router.sr is None:
@@ -529,7 +531,7 @@ async def create_chat_completion(
             
         print(f"📊 [TELEMETRY STATE] Processing Complete. Overhead: {provider_latency_ms:.2f}ms | Target: {actual_provider.upper()}")
         
-        log_request(tenant.id, actual_model, p_tokens, c_tokens, cost)
+        background_tasks.add_task(log_request, tenant.id, actual_model, p_tokens, c_tokens, cost)
         return {
             "status": "success", 
             "data": str(content), 
