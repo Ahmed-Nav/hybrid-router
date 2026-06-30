@@ -313,7 +313,8 @@ async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: 
 # PHASE 5: DOWNTIME-FREE IDENTITY GATEWAY ENDPOINTS
 # ---------------------------------------------------------
 @app.post("/v1/auth/login")
-async def login_dashboard_session(payload: LoginRequest):
+@limiter.limit("10/minute")
+async def login_dashboard_session(request: Request, payload: LoginRequest):
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.username == payload.username).first()
@@ -383,8 +384,8 @@ async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Requ
     if payload.event == "payment.captured":
         payment_entity = payload.payload.payment.entity
         customer_identifier = f"org_{payment_entity.id}"
-        # Basic: ₹49 (4900 paise), Premium: ₹199 (19900 paise)
-        inferred_tier = "PREMIUM" if payment_entity.amount >= 10000 else "BASIC"
+        # Basic: ₹1,999 (199900 paise), Premium: ₹6,999 (699900 paise)
+        inferred_tier = "PREMIUM" if payment_entity.amount >= 400000 else "BASIC"
         
         db = SessionLocal()
         try:
@@ -420,8 +421,7 @@ async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Requ
             return {
                 "status": "success",
                 "provisioned_id": customer_identifier,
-                "assigned_tier": inferred_tier,
-                "allocated_credentials_vector": generated_live_key
+                "assigned_tier": inferred_tier
             }
         except Exception as e:
             db.rollback()

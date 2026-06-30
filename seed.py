@@ -1,10 +1,21 @@
 # seed.py
+import os
 from dotenv import load_dotenv
 load_dotenv()
 
 from database import SessionLocal, Tenant, User, hash_api_key, hash_password
 
 def seed_enterprise_data():
+    import sys
+    db_url = os.environ.get("DATABASE_URL", "")
+    is_local = any(h in db_url for h in ["localhost", "127.0.0.1", "::1"])
+    seed_allowed = os.environ.get("SEED_ALLOW_DROP", "").lower() == "true"
+
+    if not is_local and not seed_allowed:
+        print("🚨 [SEED GUARD] Refusing to drop tables on a non-local database.")
+        print("   Set SEED_ALLOW_DROP=true to override. Never do this on production.")
+        sys.exit(1)
+
     db = SessionLocal()
     try:
         print("🌱 Starting Database Provisioning sequence...")

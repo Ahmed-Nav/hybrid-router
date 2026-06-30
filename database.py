@@ -1,5 +1,6 @@
 # database.py
 import os
+import hmac
 import hashlib
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -7,6 +8,8 @@ from sqlalchemy.orm import sessionmaker, relationship
 import datetime
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("FATAL: DATABASE_URL environment variable is unset. Cannot start application.")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -68,7 +71,7 @@ def verify_password(password: str, hashed_value: str) -> bool:
         salt_hex, hash_hex = hashed_value.split('$')
         salt = bytes.fromhex(salt_hex)
         new_hash = hashlib.pbkdf2_hmac('sha256', password.strip().encode('utf-8'), salt, 100000)
-        return new_hash.hex() == hash_hex
+        return hmac.compare_digest(new_hash.hex(), hash_hex)
     except Exception:
         return False
 

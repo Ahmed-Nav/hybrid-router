@@ -59,7 +59,7 @@ export default function Home() {
             <div className="border-3 border-[#1E1E1E] p-6 bg-[#F5F4F0] flex flex-col justify-between shadow-[5px_5px_0px_#1E1E1E]">
               <div>
                 <h3 className="text-2xl font-bold mb-2">Developer Basic</h3>
-                <div className="text-3xl font-extrabold mb-4">₹49 <span className="text-base font-normal text-gray-500">/ month</span></div>
+                <div className="text-3xl font-extrabold mb-4">₹1,999 <span className="text-base font-normal text-gray-500">/ month</span></div>
                 <ul className="space-y-2 mb-6">
                   <li className="flex items-center gap-2"><span className="text-[#F28C28] font-bold">✓</span> Dynamic Groq/Gemini Routing</li>
                   <li className="flex items-center gap-2"><span className="text-[#F28C28] font-bold">✓</span> Local PII Sanitization Guard</li>
@@ -68,7 +68,7 @@ export default function Home() {
                 </ul>
               </div>
               <button 
-                onClick={() => redirectToPayment("https://rzp.io/rzp/neB7pXDr")}
+                onClick={() => redirectToPayment("https://rzp.io/rzp/XNQO1xe7")}
                 className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 hover:shadow-[3px_3px_0px_#1E1E1E] transition duration-100"
               >
                 Buy Developer Basic
@@ -79,7 +79,7 @@ export default function Home() {
             <div className="border-3 border-[#F28C28] p-6 bg-[#FFFDF9] flex flex-col justify-between shadow-[6px_6px_0px_#F28C28]">
               <div>
                 <h3 className="text-2xl font-bold mb-2 text-[#F28C28]">Enterprise Pro</h3>
-                <div className="text-3xl font-extrabold mb-4">₹199 <span className="text-base font-normal text-gray-500">/ month</span></div>
+                <div className="text-3xl font-extrabold mb-4">₹6,999 <span className="text-base font-normal text-gray-500">/ month</span></div>
                 <ul className="space-y-2 mb-6">
                   <li className="flex items-center gap-2"><span className="text-[#F28C28] font-bold">✓</span> Dynamic Groq/Gemini Routing</li>
                   <li className="flex items-center gap-2"><span className="text-[#F28C28] font-bold">✓</span> Local PII Sanitization Guard</li>
@@ -89,7 +89,7 @@ export default function Home() {
                 </ul>
               </div>
               <button 
-                onClick={() => redirectToPayment("https://rzp.io/rzp/wDEhxtFN")}
+                onClick={() => redirectToPayment("https://rzp.io/rzp/sn56YqL")}
                 className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 hover:shadow-[3px_3px_0px_#1E1E1E] transition duration-100"
               >
                 Buy Enterprise Pro
