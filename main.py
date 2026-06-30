@@ -93,22 +93,13 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
-class RazorpayPaymentEntity(BaseModel):
-    id: str
-    amount: int
-    currency: str
-    email: Optional[str] = None
-    contact: Optional[str] = None
+class TenantSettingsUpdate(BaseModel):
+    routing_mode: Optional[str] = None
+    fallback_provider: Optional[str] = None
 
-class RazorpayPayment(BaseModel):
-    entity: RazorpayPaymentEntity
-
-class RazorpayPayload(BaseModel):
-    payment: RazorpayPayment
-
-class RazorpayWebhookPayload(BaseModel):
-    event: str
-    payload: RazorpayPayload
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 # ---------------------------------------------------------
@@ -369,67 +360,106 @@ def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
 # PHASE 6: UN-AUTHENTICATED WEBHOOK INGESTION ENGINES
 # ---------------------------------------------------------
 @app.post("/v1/webhooks/razorpay")
-async def handle_razorpay_webhook(payload: RazorpayWebhookPayload, request: Request, background_tasks: BackgroundTasks):
+async def handle_razorpay_webhook(request: Request, background_tasks: BackgroundTasks):
     razorpay_signature = request.headers.get("X-Razorpay-Signature")
     webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET")
-    
+
     if not webhook_secret:
-        print("🚨 [WEBHOOK CRITICAL] RAZORPAY_WEBHOOK_SECRET is not set in environment variables. Dropping transaction.")
+        print("🚨 [WEBHOOK CRITICAL] RAZORPAY_WEBHOOK_SECRET is not set. Dropping event.")
         raise HTTPException(status_code=500, detail="Webhook verification is not configured.")
-    
+
     body = await request.body()
     if not verify_razorpay_signature(body, razorpay_signature, webhook_secret):
-        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature verification.")
+        raise HTTPException(status_code=400, detail="Invalid Razorpay webhook signature.")
 
-    if payload.event == "payment.captured":
-        payment_entity = payload.payload.payment.entity
-        customer_identifier = f"org_{payment_entity.id}"
-        # Basic: ₹1,999 (199900 paise), Premium: ₹6,999 (699900 paise)
-        inferred_tier = "PREMIUM" if payment_entity.amount >= 400000 else "BASIC"
-        
+    try:
+        data = json.loads(body)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    event = data.get("event", "")
+    payment_entity = data.get("payload", {}).get("payment", {}).get("entity", {})
+
+    # ------------------------------------------------------------------
+    # EVENT: payment.captured — provision new tenant on successful payment
+    # ------------------------------------------------------------------
+    if event == "payment.captured":
+        customer_identifier = f"org_{payment_entity.get('id', '')}"
+        inferred_tier = "PREMIUM" if payment_entity.get("amount", 0) >= 400000 else "BASIC"
+
         db = SessionLocal()
         try:
-            existing_tenant = db.query(Tenant).filter(Tenant.id == customer_identifier).first()
-            if existing_tenant:
-                return {"status": "skipped", "reason": f"Organization {customer_identifier} already initialized."}
-            
-            # 1. Provision new Tenant
-            generated_live_key = provision_new_tenant(
-                db_session=db, 
-                tenant_id=customer_identifier, 
-                plan_tier=inferred_tier
-            )
-            
-            # 2. Provision Admin User
-            import secrets
-            customer_email = payment_entity.email if payment_entity.email else "customer@example.com"
-            temp_password = secrets.token_urlsafe(8)
-            hashed_pw = hash_password(temp_password)
-            
+            if db.query(Tenant).filter(Tenant.id == customer_identifier).first():
+                return {"status": "skipped", "reason": f"{customer_identifier} already provisioned."}
+
+            generated_live_key = provision_new_tenant(db_session=db, tenant_id=customer_identifier, plan_tier=inferred_tier)
+
+            import secrets as _secrets
+            customer_email = payment_entity.get("email") or "customer@example.com"
+            temp_password = _secrets.token_urlsafe(8)
             new_user = User(
                 username=customer_email,
-                password_hash=hashed_pw,
+                password_hash=hash_password(temp_password),
                 role="TENANT_ADMIN",
                 tenant_id=customer_identifier
             )
             db.add(new_user)
             db.commit()
-            
-            # 3. Schedule email delivery
+
             background_tasks.add_task(send_provisioning_email, customer_email, customer_identifier, generated_live_key, temp_password)
-            
-            return {
-                "status": "success",
-                "provisioned_id": customer_identifier,
-                "assigned_tier": inferred_tier
-            }
+            return {"status": "success", "provisioned_id": customer_identifier, "assigned_tier": inferred_tier}
+
         except Exception as e:
             db.rollback()
-            print(f"🚨 [WEBHOOK CRITICAL ERROR] Razorpay onboarding pipeline failed: {str(e)}")
-            raise HTTPException(status_code=500, detail="Automated account onboarding transaction aborted.")
+            print(f"🚨 [WEBHOOK ERROR] Onboarding failed: {str(e)}")
+            raise HTTPException(status_code=500, detail="Account onboarding failed.")
         finally:
             db.close()
-    return {"status": "ignored", "message": "Unhandled operational event hook type signature."}
+
+    # ------------------------------------------------------------------
+    # EVENT: payment.failed — deactivate tenant on failed renewal payment
+    # ------------------------------------------------------------------
+    elif event == "payment.failed":
+        customer_email = payment_entity.get("email")
+        if customer_email:
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.username == customer_email).first()
+                if user and user.tenant_id:
+                    tenant_row = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+                    if tenant_row and tenant_row.is_active:
+                        tenant_row.is_active = False
+                        db.commit()
+                        print(f"🚨 [WEBHOOK] Tenant {user.tenant_id} deactivated — payment failed.")
+                        background_tasks.add_task(
+                            send_provisioning_email, customer_email, user.tenant_id,
+                            "PAYMENT_FAILED", None
+                        )
+            finally:
+                db.close()
+        return {"status": "processed", "event": event}
+
+    # ------------------------------------------------------------------
+    # EVENT: subscription.cancelled — deactivate tenant on cancellation
+    # ------------------------------------------------------------------
+    elif event == "subscription.cancelled":
+        sub_entity = data.get("payload", {}).get("subscription", {}).get("entity", {})
+        customer_email = sub_entity.get("notes", {}).get("email") or payment_entity.get("email")
+        if customer_email:
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.username == customer_email).first()
+                if user and user.tenant_id:
+                    tenant_row = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+                    if tenant_row:
+                        tenant_row.is_active = False
+                        db.commit()
+                        print(f"🔕 [WEBHOOK] Tenant {user.tenant_id} deactivated — subscription cancelled.")
+            finally:
+                db.close()
+        return {"status": "processed", "event": event}
+
+    return {"status": "ignored", "event": event}
 
 # ---------------------------------------------------------
 # CORE PLATFORM RUNTIME COMPLETIONS ROUTE
@@ -549,17 +579,80 @@ async def get_analytics(tenant: Tenant = Depends(get_tenant_from_session_or_key)
     db = SessionLocal()
     try:
         stats = db.query(
-            func.sum(UsageLog.cost_incurred).label("total_cost"), 
+            func.sum(UsageLog.cost_incurred).label("total_cost"),
             func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens")
         ).filter(UsageLog.tenant_id == tenant.id).first()
-        
+
         return {
             "tenant_id": tenant.id,
             "plan_tier": tenant.plan_tier,
+            "routing_mode": tenant.routing_mode,
+            "fallback_provider": tenant.fallback_provider,
             "total_spend": round(float(stats.total_cost or 0), 4),
             "total_tokens": int(stats.total_tokens or 0),
             "api_key_hash": tenant.api_key
         }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# TENANT SETTINGS ENDPOINT
+# ---------------------------------------------------------
+VALID_ROUTING_MODES = {"ECO", "SMART", "PERFORMANCE"}
+VALID_PROVIDERS = {"groq", "gemini"}
+
+@app.patch("/v1/tenant/settings")
+async def update_tenant_settings(
+    update: TenantSettingsUpdate,
+    tenant: Tenant = Depends(get_tenant_from_session_or_key)
+):
+    if update.routing_mode and update.routing_mode.upper() not in VALID_ROUTING_MODES:
+        raise HTTPException(status_code=422, detail=f"routing_mode must be one of {sorted(VALID_ROUTING_MODES)}")
+    if update.fallback_provider and update.fallback_provider.lower() not in VALID_PROVIDERS:
+        raise HTTPException(status_code=422, detail=f"fallback_provider must be one of {sorted(VALID_PROVIDERS)}")
+
+    db = SessionLocal()
+    try:
+        tenant_row = db.query(Tenant).filter(Tenant.id == tenant.id).first()
+        if update.routing_mode:
+            tenant_row.routing_mode = update.routing_mode.upper()
+        if update.fallback_provider:
+            tenant_row.fallback_provider = update.fallback_provider.lower()
+        db.commit()
+        return {
+            "status": "success",
+            "routing_mode": tenant_row.routing_mode,
+            "fallback_provider": tenant_row.fallback_provider
+        }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# PASSWORD CHANGE ENDPOINT
+# ---------------------------------------------------------
+@app.post("/v1/auth/change-password")
+async def change_password(payload: ChangePasswordRequest, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    try:
+        claims = jwt.decode(auth_header.split(" ")[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = claims.get("sub")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+
+    if len(payload.new_password) < 8:
+        raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == username).first()
+        if not user or not verify_password(payload.current_password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+        user.password_hash = hash_password(payload.new_password)
+        db.commit()
+        return {"status": "success", "message": "Password updated successfully."}
     finally:
         db.close()
 

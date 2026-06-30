@@ -14,6 +14,8 @@ interface UserInfo {
 interface Metrics {
   tenant_id: string;
   plan_tier: string;
+  routing_mode: string;
+  fallback_provider: string;
   total_spend: number;
   total_tokens: number;
   api_key_hash: string;
@@ -27,13 +29,18 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // States for LLM preferences override
+  // Routing preference state — initialised from the analytics response
   const [routingMode, setRoutingMode] = useState("SMART");
   const [fallbackProvider, setFallbackProvider] = useState("groq");
-  
-  // States for dynamic token generation mockup
-  const [newKeyLabel, setNewKeyLabel] = useState("");
-  const [generatedKey, setGeneratedKey] = useState("");
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsMsg, setSettingsMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Password change state
+  const [currentPwd, setCurrentPwd] = useState("");
+  const [newPwd, setNewPwd] = useState("");
+  const [confirmPwd, setConfirmPwd] = useState("");
+  const [pwdSaving, setPwdSaving] = useState(false);
+  const [pwdMsg, setPwdMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     const storedToken = localStorage.getItem("auth_token");
@@ -64,13 +71,13 @@ export default function Dashboard() {
   const fetchMetrics = async (authToken: string) => {
     try {
       const res = await fetch(`${BACKEND_URL}/v1/analytics`, {
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-        },
+        headers: { Authorization: `Bearer ${authToken}` },
       });
       if (res.ok) {
         const data = await res.json();
         setMetrics(data);
+        if (data.routing_mode) setRoutingMode(data.routing_mode);
+        if (data.fallback_provider) setFallbackProvider(data.fallback_provider);
       } else {
         console.error("Failed to load metrics from API gateway");
       }
@@ -98,11 +105,11 @@ export default function Dashboard() {
   // Define tabs based on role
   const getTabs = () => {
     if (user.role === "SUPER_ADMIN") {
-      return ["Global Platform Analytics", "B2B Tenant Provisioning", "Infrastructure Controls"];
+      return ["Global Platform Analytics", "B2B Tenant Provisioning", "Infrastructure Controls", "Security Settings"];
     } else if (user.role === "TENANT_ADMIN") {
-      return ["FinOps Billing Suite", "The LLM Option Control", "API Key Lifecycle Engine"];
+      return ["FinOps Billing Suite", "The LLM Option Control", "API Key Lifecycle Engine", "Security Settings"];
     } else {
-      return ["Developer Credential Safe", "Integration Snippets", "Personal Usage Stream"];
+      return ["Developer Credential Safe", "Integration Snippets", "Personal Usage Stream", "Security Settings"];
     }
   };
 
@@ -244,13 +251,40 @@ export default function Dashboard() {
                 </select>
               </div>
 
-              <button 
-                onClick={() => {
-                  alert(`Preferences committed!\nMode: ${routingMode}\nFailover Provider: ${fallbackProvider}`);
+              {settingsMsg && (
+                <div className={`p-3 border-2 text-sm font-semibold ${settingsMsg.ok ? "bg-green-50 border-green-500 text-green-700" : "bg-red-50 border-red-500 text-red-700"}`}>
+                  {settingsMsg.ok ? "✓" : "⚠️"} {settingsMsg.text}
+                </div>
+              )}
+              <button
+                disabled={settingsSaving}
+                onClick={async () => {
+                  setSettingsSaving(true);
+                  setSettingsMsg(null);
+                  try {
+                    const res = await fetch(`${BACKEND_URL}/v1/tenant/settings`, {
+                      method: "PATCH",
+                      headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                      },
+                      body: JSON.stringify({ routing_mode: routingMode, fallback_provider: fallbackProvider }),
+                    });
+                    if (res.ok) {
+                      setSettingsMsg({ ok: true, text: "Settings saved successfully." });
+                    } else {
+                      const err = await res.json().catch(() => ({}));
+                      setSettingsMsg({ ok: false, text: err.detail || "Failed to save settings." });
+                    }
+                  } catch {
+                    setSettingsMsg({ ok: false, text: "Connection error. Please try again." });
+                  } finally {
+                    setSettingsSaving(false);
+                  }
                 }}
-                className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-3 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 transition duration-150"
+                className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-3 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 transition duration-150 disabled:opacity-50"
               >
-                Apply Operational Overrides Globally
+                {settingsSaving ? "Saving..." : "Apply Operational Overrides Globally"}
               </button>
             </div>
           </div>
@@ -266,40 +300,9 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="bg-white border-4 border-[#1E1E1E] p-6 shadow-[6px_6px_0px_#1E1E1E]">
-              <h3 className="text-xl font-bold mb-2 font-mono">Provision Additional App Token</h3>
-              <p className="text-sm text-gray-600 mb-4">Allocate sandboxed credentials linked directly to your organization ledger.</p>
-              
-              <div className="space-y-4">
-                <input 
-                  type="text" 
-                  value={newKeyLabel}
-                  onChange={(e) => setNewKeyLabel(e.target.value)}
-                  placeholder="Application Label (e.g. staging-server)"
-                  className="w-full p-2.5 border-2 border-[#1E1E1E] outline-none"
-                />
-
-                <button 
-                  onClick={() => {
-                    if (!newKeyLabel) {
-                      alert("Please provide an application label.");
-                      return;
-                    }
-                    const mockHex = Math.random().toString(36).substring(2, 10);
-                    setGeneratedKey(`sk_client_token_${mockHex}`);
-                  }}
-                  className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2.5 font-bold hover:bg-[#F28C28] transition duration-150"
-                >
-                  Generate Token Key Pair
-                </button>
-
-                {generatedKey && (
-                  <div className="bg-amber-50 border-2 border-amber-500 p-4 mt-2">
-                    <p className="text-xs text-amber-700 font-bold mb-1">⚠️ COPY THIS KEY IMMEDIATELY. IT WILL NOT BE SHOWN AGAIN:</p>
-                    <code className="text-sm font-bold font-mono text-[#1E1E1E]">{generatedKey}</code>
-                  </div>
-                )}
-              </div>
+            <div className="bg-[#F5F4F0] border-2 border-dashed border-[#1E1E1E] p-6">
+              <h3 className="text-lg font-bold mb-1 font-mono">Additional App Tokens</h3>
+              <p className="text-sm text-gray-500">Multi-key provisioning is on the roadmap. Your current API key (delivered at signup) is your active credential. To rotate it, contact support.</p>
             </div>
           </div>
         )}
@@ -369,27 +372,109 @@ for line in response.iter_lines():
           <div className="space-y-6 max-w-3xl">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div className="bg-white border-4 border-[#1E1E1E] p-6 shadow-[5px_5px_0px_#1E1E1E]">
-                <p className="text-xs text-gray-500 font-bold uppercase">Mean Connection Latency</p>
-                <h2 className="text-3xl font-extrabold text-[#F28C28]">342 ms</h2>
+                <p className="text-xs text-gray-500 font-bold uppercase tracking-wider">Total Tokens Processed</p>
+                <h2 className="text-3xl font-extrabold text-[#F28C28]">{metrics?.total_tokens.toLocaleString() ?? "—"}</h2>
               </div>
               <div className="bg-white border-4 border-[#1E1E1E] p-6 shadow-[5px_5px_0px_#1E1E1E]">
-                <p className="text-xs text-gray-500 font-bold uppercase">Requests Contributed</p>
-                <h2 className="text-3xl font-extrabold text-[#F28C28]">47 calls</h2>
+                <p className="text-xs text-gray-500 font-bold uppercase tracking-wider">Cumulative Spend</p>
+                <h2 className="text-3xl font-extrabold text-[#F28C28]">₹{metrics?.total_spend.toFixed(4) ?? "0.0000"}</h2>
               </div>
             </div>
 
             <div className="bg-white border-4 border-[#1E1E1E] p-6 shadow-[6px_6px_0px_#1E1E1E]">
-              <h3 className="text-xl font-bold mb-4 font-mono">🛠️ Active Connection Debug Logs</h3>
-              <div className="space-y-2 font-mono text-sm">
-                <div className="bg-[#F5F4F0] p-2.5 border-l-4 border-green-500 text-gray-700">
-                  [18:04:12] POST /v1/chat/completions - Status 200 OK (Routed: SIMPLE_CHAT via Groq)
+              <h3 className="text-xl font-bold mb-2 font-mono">📋 Request Log History</h3>
+              <p className="text-sm text-gray-500">Per-request log streaming is coming in a future release. Aggregate usage is shown above and in the FinOps tab.</p>
+            </div>
+          </div>
+        )}
+
+        {/* -------------------- SECURITY SETTINGS (ALL ROLES) -------------------- */}
+        {activeTab === "Security Settings" && (
+          <div className="max-w-lg space-y-6">
+            <div className="bg-white border-4 border-[#1E1E1E] p-6 shadow-[6px_6px_0px_#1E1E1E]">
+              <h3 className="text-xl font-bold mb-4 font-mono">🔐 Change Password</h3>
+
+              {pwdMsg && (
+                <div className={`p-3 border-2 text-sm font-semibold mb-4 ${pwdMsg.ok ? "bg-green-50 border-green-500 text-green-700" : "bg-red-50 border-red-500 text-red-700"}`}>
+                  {pwdMsg.ok ? "✓" : "⚠️"} {pwdMsg.text}
                 </div>
-                <div className="bg-[#F5F4F0] p-2.5 border-l-4 border-green-500 text-gray-700">
-                  [18:03:55] POST /v1/chat/completions - Status 200 OK (Routed: COMPLEX_REASONING via Gemini)
+              )}
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-bold mb-1">Current Password</label>
+                  <input
+                    type="password"
+                    value={currentPwd}
+                    onChange={(e) => setCurrentPwd(e.target.value)}
+                    className="w-full p-2.5 border-2 border-[#1E1E1E] outline-none focus:border-[#F28C28]"
+                    placeholder="••••••••"
+                  />
                 </div>
-                <div className="bg-[#F5F4F0] p-2.5 border-l-4 border-blue-500 text-gray-700">
-                  [17:59:01] GET /v1/analytics - Status 200 OK (Authentication Session Verified)
+                <div>
+                  <label className="block text-sm font-bold mb-1">New Password</label>
+                  <input
+                    type="password"
+                    value={newPwd}
+                    onChange={(e) => setNewPwd(e.target.value)}
+                    className="w-full p-2.5 border-2 border-[#1E1E1E] outline-none focus:border-[#F28C28]"
+                    placeholder="Min. 8 characters"
+                  />
                 </div>
+                <div>
+                  <label className="block text-sm font-bold mb-1">Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={confirmPwd}
+                    onChange={(e) => setConfirmPwd(e.target.value)}
+                    className="w-full p-2.5 border-2 border-[#1E1E1E] outline-none focus:border-[#F28C28]"
+                    placeholder="••••••••"
+                  />
+                </div>
+
+                <button
+                  disabled={pwdSaving}
+                  onClick={async () => {
+                    setPwdMsg(null);
+                    if (!currentPwd || !newPwd || !confirmPwd) {
+                      setPwdMsg({ ok: false, text: "All fields are required." });
+                      return;
+                    }
+                    if (newPwd !== confirmPwd) {
+                      setPwdMsg({ ok: false, text: "New passwords do not match." });
+                      return;
+                    }
+                    if (newPwd.length < 8) {
+                      setPwdMsg({ ok: false, text: "New password must be at least 8 characters." });
+                      return;
+                    }
+                    setPwdSaving(true);
+                    try {
+                      const res = await fetch(`${BACKEND_URL}/v1/auth/change-password`, {
+                        method: "POST",
+                        headers: {
+                          "Content-Type": "application/json",
+                          Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({ current_password: currentPwd, new_password: newPwd }),
+                      });
+                      if (res.ok) {
+                        setPwdMsg({ ok: true, text: "Password updated. Use your new password on next login." });
+                        setCurrentPwd(""); setNewPwd(""); setConfirmPwd("");
+                      } else {
+                        const err = await res.json().catch(() => ({}));
+                        setPwdMsg({ ok: false, text: err.detail || "Failed to update password." });
+                      }
+                    } catch {
+                      setPwdMsg({ ok: false, text: "Connection error. Please try again." });
+                    } finally {
+                      setPwdSaving(false);
+                    }
+                  }}
+                  className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2.5 font-bold hover:bg-[#F28C28] transition duration-150 disabled:opacity-50"
+                >
+                  {pwdSaving ? "Updating..." : "Update Password"}
+                </button>
               </div>
             </div>
           </div>
