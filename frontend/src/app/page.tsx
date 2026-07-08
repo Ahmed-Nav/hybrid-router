@@ -1,8 +1,20 @@
 "use client";
 
+import { useState } from "react";
+
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "https://ahmednav-hybrid-router.hf.space";
 
 export default function Home() {
+  const [monthlyRequests, setMonthlyRequests] = useState(500000);
+  const [simpleTaskPercentage, setSimpleTaskPercentage] = useState(70);
+
+  const totalTokens = monthlyRequests * 1500;
+  const traditionalCost = (totalTokens / 1000000) * 800;
+  const simpleCount = monthlyRequests * (simpleTaskPercentage / 100);
+  const complexCount = monthlyRequests - simpleCount;
+  const optimizedCost = ((simpleCount * 1500) / 1000000) * 8 + ((complexCount * 1500) / 1000000) * 800;
+  const monthlySavings = traditionalCost - optimizedCost;
+  const savingsPercent = traditionalCost > 0 ? (monthlySavings / traditionalCost) * 100 : 0;
   const redirectToPayment = (url: string) => {
     console.log(`Redirecting to payment page: ${url}`);
     window.open(url, "_blank");
@@ -47,8 +59,91 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Savings Audit Calculator Section */}
+        <div className="bg-white border-4 border-[#1E1E1E] p-8 mb-12 shadow-[8px_8px_0px_#1E1E1E]">
+          <div className="mb-6">
+            <h2 className="text-3xl font-extrabold mb-2 font-mono">📊 LLM Savings Audit Calculator</h2>
+            <p className="text-gray-600">Simulate your workload to estimate monthly savings when migrating from uniform premium models to the Hybrid Gateway.</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+            {/* Controls */}
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold uppercase tracking-wider mb-2 font-mono">
+                  Estimated Monthly API Requests: <span className="text-[#F28C28]">{monthlyRequests.toLocaleString()}</span>
+                </label>
+                <input 
+                  type="range" 
+                  min="10000" 
+                  max="5000000" 
+                  step="10000"
+                  value={monthlyRequests}
+                  onChange={(e) => setMonthlyRequests(Number(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#F28C28]"
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>10k</span>
+                  <span>2.5M</span>
+                  <span>5M</span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold uppercase tracking-wider mb-2 font-mono">
+                  % of Routine Tasks (Summaries, Classification): <span className="text-[#F28C28]">{simpleTaskPercentage}%</span>
+                </label>
+                <input 
+                  type="range" 
+                  min="0" 
+                  max="100" 
+                  step="5"
+                  value={simpleTaskPercentage}
+                  onChange={(e) => setSimpleTaskPercentage(Number(e.target.value))}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-[#F28C28]"
+                />
+                <div className="flex justify-between text-xs text-gray-400 mt-1">
+                  <span>0% (All Hard)</span>
+                  <span>50%</span>
+                  <span>100% (All Simple)</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Visual Savings Audit Output */}
+            <div className="bg-[#F5F4F0] border-3 border-[#1E1E1E] p-6 shadow-[5px_5px_0px_#1E1E1E] space-y-4">
+              <div className="flex justify-between border-b border-gray-300 pb-2">
+                <span className="text-sm font-bold text-gray-500 font-mono">Uniform Premium Route Cost:</span>
+                <span className="font-bold text-red-600 font-mono">₹{Math.round(traditionalCost).toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between border-b border-gray-300 pb-2">
+                <span className="text-sm font-bold text-gray-500 font-mono">Hybrid Router Cost:</span>
+                <span className="font-bold text-green-600 font-mono">₹{Math.round(optimizedCost).toLocaleString()}</span>
+              </div>
+              <div className="pt-2">
+                <p className="text-xs text-gray-400 font-bold uppercase tracking-wider font-mono">Estimated Monthly Savings</p>
+                <div className="text-3xl font-extrabold text-[#F28C28] font-mono">
+                  ₹{Math.round(monthlySavings).toLocaleString()}
+                </div>
+                <div className="text-xs text-green-600 font-bold mt-1">
+                  ★ Reduces your LLM spending by {savingsPercent.toFixed(0)}%!
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  const el = document.getElementById("pricing-section");
+                  if (el) el.scrollIntoView({ behavior: 'smooth' });
+                }}
+                className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 transition duration-100 mt-2 text-center"
+              >
+                Claim Your Cost Savings
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Pricing Area */}
-        <div className="bg-white border-4 border-[#1E1E1E] p-8 mb-8 shadow-[8px_8px_0px_#1E1E1E]">
+        <div id="pricing-section" className="bg-white border-4 border-[#1E1E1E] p-8 mb-8 shadow-[8px_8px_0px_#1E1E1E]">
           <div className="text-center mb-8">
             <h2 className="text-3xl font-extrabold mb-2">B2B Developer SaaS Plans</h2>
             <p className="text-gray-600">Choose a tier to match your application demand and compliance posture.</p>

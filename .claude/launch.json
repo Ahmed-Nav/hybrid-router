@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend-preview",
+      "runtimeExecutable": "./venv/Scripts/python.exe",
+      "runtimeArgs": ["scripts/run_preview_backend.py"],
+      "port": 8000
+    },
+    {
+      "name": "frontend-preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "port": 3000
+    }
+  ]
+}

@@ -15,18 +15,32 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# Pricing model: flat monthly base fee (per plan tier) + a markup on real usage cost.
+# The base fee buys the lane (rate limit + model-tier eligibility, enforced elsewhere in main.py);
+# the usage markup is billed on top of the real provider cost and is the founder's usage-based margin.
+REFERENCE_MODEL_COST_PER_1M_TOKENS = 0.79   # cost if every request had gone to the top-tier model unrouted — client savings baseline
+USAGE_MARKUP_MULTIPLIER = 1.3               # client is billed cost_incurred x this
+
+PLAN_PRICING = {
+    "BASIC":   {"base_fee": 1999.0, "rate_limit": "60/minute"},
+    "PREMIUM": {"base_fee": 6999.0, "rate_limit": "1000/minute"},
+}
+
 class Tenant(Base):
     __tablename__ = "tenants"
     id = Column(String, primary_key=True, index=True)
     api_key = Column(String, unique=True, index=True)
     plan_tier = Column(String, default="BASIC")
     is_active = Column(Boolean, default=True)
-    
-    routing_mode = Column(String, default="SMART")           
+
+    routing_mode = Column(String, default="SMART")
     fallback_provider = Column(String, default="gemini")
-    
+
+    monthly_budget_cap = Column(Float, nullable=True)
+    budget_alert_sent_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    
+
     users = relationship("User", back_populates="tenant", cascade="all, delete-orphan")
 
 class User(Base):
@@ -49,6 +63,10 @@ class UsageLog(Base):
     prompt_tokens = Column(Integer)
     completion_tokens = Column(Integer)
     cost_incurred = Column(Float)
+    used_fallback = Column(Boolean, default=False)
+    was_tier_capped = Column(Boolean, default=False)
+    reference_cost = Column(Float, default=0.0)
+    billed_usage_cost = Column(Float, default=0.0)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
 Base.metadata.create_all(bind=engine)
@@ -75,15 +93,22 @@ def verify_password(password: str, hashed_value: str) -> bool:
     except Exception:
         return False
 
-def log_request(tenant_id, model, p_tokens, c_tokens, cost):
+def log_request(tenant_id, model, p_tokens, c_tokens, cost, used_fallback=False, was_tier_capped=False):
     db = SessionLocal()
     try:
+        total_tokens = p_tokens + c_tokens
+        reference_cost = (total_tokens * REFERENCE_MODEL_COST_PER_1M_TOKENS) / 1_000_000
+        billed_usage_cost = cost * USAGE_MARKUP_MULTIPLIER
         log = UsageLog(
-            tenant_id=tenant_id, 
-            model_used=model, 
-            prompt_tokens=p_tokens, 
-            completion_tokens=c_tokens, 
-            cost_incurred=cost
+            tenant_id=tenant_id,
+            model_used=model,
+            prompt_tokens=p_tokens,
+            completion_tokens=c_tokens,
+            cost_incurred=cost,
+            used_fallback=used_fallback,
+            was_tier_capped=was_tier_capped,
+            reference_cost=reference_cost,
+            billed_usage_cost=billed_usage_cost,
         )
         db.add(log)
         db.commit()

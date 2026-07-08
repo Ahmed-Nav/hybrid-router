@@ -2,3 +2,5 @@
 arize-phoenix==15.4.0
 opentelemetry-instrumentation-fastapi
 openinference-instrumentation
+pytest
+httpx

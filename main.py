@@ -1,10 +1,11 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key, provision_new_tenant, User, hash_password, verify_password
+from database import SessionLocal, UsageLog, log_request, Tenant, hash_api_key, provision_new_tenant, User, hash_password, verify_password, PLAN_PRICING
 import os
 import time
 import json
+import secrets
 from fastapi import FastAPI, HTTPException, Security, Depends, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,14 +26,13 @@ import httpx
 # ---------------------------------------------------------
 # CORE STATE ENGINE & SECURITY INITIALIZATIONS
 # ---------------------------------------------------------
-def get_tenant_rate_limit(request: Request) -> str:
-    api_key = request.headers.get("X-API-Key")
-    if not api_key:
+def get_tenant_rate_limit(key: str = None) -> str:
+    if not key:
         return "60/minute"
     db = SessionLocal()
     try:
-        hashed_key = hash_api_key(api_key)
-        tenant = db.query(Tenant).filter(Tenant.api_key == hashed_key, Tenant.is_active == True).first()
+        # 'key' is already the hashed API key returned by get_rate_limit_key
+        tenant = db.query(Tenant).filter(Tenant.api_key == key, Tenant.is_active == True).first()
         if tenant and tenant.plan_tier == "PREMIUM":
             return "1000/minute"
     except Exception:
@@ -96,6 +96,7 @@ class LoginRequest(BaseModel):
 class TenantSettingsUpdate(BaseModel):
     routing_mode: Optional[str] = None
     fallback_provider: Optional[str] = None
+    monthly_budget_cap: Optional[float] = None
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
@@ -248,6 +249,19 @@ async def get_tenant_from_session_or_key(request: Request):
     finally:
         db.close()
 
+async def get_current_admin_user(request: Request) -> dict:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Missing or invalid authorization header.")
+    token = auth_header.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=403, detail="Invalid or expired session token.")
+    if payload.get("role") != "SUPER_ADMIN":
+        raise HTTPException(status_code=403, detail="This resource requires platform administrator access.")
+    return payload
+
 async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: str, temp_password: str = None):
     resend_api_key = os.environ.get("RESEND_API_KEY")
     if not resend_api_key:
@@ -263,9 +277,9 @@ async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: 
     credentials_section = ""
     if temp_password:
         credentials_section = f"""
-        <h4>Operator Control Dashboard Credentials:</h4>
-        <p>Log in to configure failovers, routing modes, and view FinOps ROI analytics:</p>
-        <p>Console URL: <a href="https://hybrid-router.vercel.app/login">https://hybrid-router.vercel.app/login</a></p>
+        <h4>Dashboard Login</h4>
+        <p>Log in to view your billing, manage your routing settings, and get your API key:</p>
+        <p>Dashboard URL: <a href="https://hybrid-router.vercel.app/login">https://hybrid-router.vercel.app/login</a></p>
         <ul>
             <li><strong>Username:</strong> {customer_email}</li>
             <li><strong>Password:</strong> <code>{temp_password}</code></li>
@@ -311,7 +325,7 @@ async def login_dashboard_session(request: Request, payload: LoginRequest):
         user = db.query(User).filter(User.username == payload.username).first()
         
         if not user or not verify_password(payload.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid operator identity or password alignment.")
+            raise HTTPException(status_code=401, detail="Invalid username or password.")
         
         token_expiry = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         token_claims = {
@@ -497,16 +511,18 @@ async def create_chat_completion(
     mapping = router.MODEL_MAPPINGS.get(matched_route, {"model": "llama-3.3-70b-versatile", "provider": "groq"})
 
     # Graceful degradation rules for adaptive tier matching bounds
+    request_was_tier_capped = False
     if mapping["provider"] == "gemini" or "70b" in mapping["model"]:
         if tenant.plan_tier != "PREMIUM":
             if payload.model not in ["hybrid-gateway", "default", "", None]:
                 raise HTTPException(
-                    status_code=402, 
+                    status_code=402,
                     detail="Payment Required: Upgrade to Premium to unlock advanced inference tiers."
                 )
             else:
                 matched_route = "simple_chat"
                 mapping = router.MODEL_MAPPINGS.get(matched_route)
+                request_was_tier_capped = True
                 print(f"🔶 [TIER ENFORCEMENT] Demoting route to Simple Chat for BASIC tier: {tenant.id}")
 
     if matched_route == "safety_block":
@@ -560,8 +576,9 @@ async def create_chat_completion(
             cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
             
         print(f"📊 [TELEMETRY STATE] Processing Complete. Overhead: {provider_latency_ms:.2f}ms | Target: {actual_provider.upper()}")
-        
-        background_tasks.add_task(log_request, tenant.id, actual_model, p_tokens, c_tokens, cost)
+
+        request_used_fallback = actual_provider != planned_provider
+        background_tasks.add_task(log_request, tenant.id, actual_model, p_tokens, c_tokens, cost, request_used_fallback, request_was_tier_capped)
         return {
             "status": "success", 
             "data": str(content), 
@@ -578,20 +595,228 @@ async def create_chat_completion(
 async def get_analytics(tenant: Tenant = Depends(get_tenant_from_session_or_key)):
     db = SessionLocal()
     try:
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
         stats = db.query(
-            func.sum(UsageLog.cost_incurred).label("total_cost"),
-            func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens")
-        ).filter(UsageLog.tenant_id == tenant.id).first()
+            func.sum(UsageLog.billed_usage_cost).label("total_billed"),
+            func.sum(UsageLog.reference_cost).label("total_reference"),
+            func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens).label("total_tokens"),
+        ).filter(UsageLog.tenant_id == tenant.id, UsageLog.timestamp >= month_start).first()
+
+        total_requests = db.query(UsageLog).filter(
+            UsageLog.tenant_id == tenant.id, UsageLog.timestamp >= month_start
+        ).count()
+        fallback_count = db.query(UsageLog).filter(
+            UsageLog.tenant_id == tenant.id, UsageLog.used_fallback == True, UsageLog.timestamp >= month_start
+        ).count()
+
+        recent_logs_query = db.query(UsageLog).filter(UsageLog.tenant_id == tenant.id).order_by(UsageLog.timestamp.desc()).limit(5).all()
+        recent_logs = [
+            {
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+                "model_used": log.model_used,
+                "prompt_tokens": log.prompt_tokens,
+                "completion_tokens": log.completion_tokens,
+                "billed_usage_cost": round(log.billed_usage_cost, 6) if log.billed_usage_cost else 0.0,
+                "used_fallback": log.used_fallback,
+            }
+            for log in recent_logs_query
+        ]
+
+        base_fee = PLAN_PRICING.get(tenant.plan_tier, {}).get("base_fee", 0.0)
 
         return {
             "tenant_id": tenant.id,
             "plan_tier": tenant.plan_tier,
             "routing_mode": tenant.routing_mode,
             "fallback_provider": tenant.fallback_provider,
-            "total_spend": round(float(stats.total_cost or 0), 4),
+            "base_fee": base_fee,
+            "total_spend": round(float(stats.total_billed or 0), 4),
+            "total_reference_cost": round(float(stats.total_reference or 0), 4),
             "total_tokens": int(stats.total_tokens or 0),
-            "api_key_hash": tenant.api_key
+            "total_requests": total_requests,
+            "fallback_count": fallback_count,
+            "monthly_budget_cap": tenant.monthly_budget_cap,
+            "recent_logs": recent_logs,
+            "api_key_hash": tenant.api_key,
         }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# DAILY TIMESERIES ENDPOINT (trend chart / forecast source data)
+# ---------------------------------------------------------
+@app.get("/v1/analytics/timeseries")
+async def get_analytics_timeseries(days: int = 30, tenant: Tenant = Depends(get_tenant_from_session_or_key)):
+    db = SessionLocal()
+    try:
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        logs = db.query(UsageLog).filter(
+            UsageLog.tenant_id == tenant.id,
+            UsageLog.timestamp >= start_date,
+        ).all()
+
+        buckets = {
+            (start_date + timedelta(days=i)).isoformat(): {
+                "date": (start_date + timedelta(days=i)).isoformat(),
+                "billed_usage_cost": 0.0,
+                "reference_cost": 0.0,
+                "request_count": 0,
+                "fallback_count": 0,
+            }
+            for i in range(days)
+        }
+
+        for log in logs:
+            key = log.timestamp.date().isoformat()
+            if key in buckets:
+                buckets[key]["billed_usage_cost"] += log.billed_usage_cost or 0.0
+                buckets[key]["reference_cost"] += log.reference_cost or 0.0
+                buckets[key]["request_count"] += 1
+                if log.used_fallback:
+                    buckets[key]["fallback_count"] += 1
+
+        daily = [buckets[k] for k in sorted(buckets.keys())]
+        for d in daily:
+            d["billed_usage_cost"] = round(d["billed_usage_cost"], 4)
+            d["reference_cost"] = round(d["reference_cost"], 4)
+
+        return {"daily": daily}
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# SUPER_ADMIN — PLATFORM-WIDE REVENUE, COST, PROFIT ROLLUP
+# ---------------------------------------------------------
+@app.get("/v1/admin/overview")
+async def get_admin_overview(admin: dict = Depends(get_current_admin_user)):
+    db = SessionLocal()
+    try:
+        tenants = db.query(Tenant).all()
+        total_tenant_count = len(tenants)
+        active_tenants = [t for t in tenants if t.is_active]
+        active_tenant_count = len(active_tenants)
+
+        total_base_fee_revenue = sum(
+            PLAN_PRICING.get(t.plan_tier, {}).get("base_fee", 0.0) for t in active_tenants
+        )
+
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        usage_stats = db.query(
+            func.sum(UsageLog.billed_usage_cost).label("total_billed"),
+            func.sum(UsageLog.cost_incurred).label("total_cogs"),
+            func.sum(UsageLog.reference_cost).label("total_reference"),
+        ).filter(UsageLog.timestamp >= month_start).first()
+
+        total_billed = float(usage_stats.total_billed or 0)
+        total_cogs = float(usage_stats.total_cogs or 0)
+        total_reference = float(usage_stats.total_reference or 0)
+
+        total_revenue = total_base_fee_revenue + total_billed
+        platform_profit = total_revenue - total_cogs
+
+        fallback_trigger_count = db.query(UsageLog).filter(
+            UsageLog.used_fallback == True, UsageLog.timestamp >= month_start
+        ).count()
+
+        return {
+            "total_tenant_count": total_tenant_count,
+            "active_tenant_count": active_tenant_count,
+            "total_revenue": round(total_revenue, 4),
+            "total_cogs": round(total_cogs, 4),
+            "platform_profit": round(platform_profit, 4),
+            "total_reference_cost_saved": round(total_reference - total_billed, 4),
+            "fallback_trigger_count": fallback_trigger_count,
+        }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# SUPER_ADMIN — PER-TENANT PROFIT BREAKDOWN
+# ---------------------------------------------------------
+@app.get("/v1/admin/tenants")
+async def get_admin_tenants(admin: dict = Depends(get_current_admin_user)):
+    db = SessionLocal()
+    try:
+        tenants = db.query(Tenant).all()
+        month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        rows = []
+        for t in tenants:
+            usage_stats = db.query(
+                func.sum(UsageLog.billed_usage_cost).label("billed"),
+                func.sum(UsageLog.cost_incurred).label("cogs"),
+            ).filter(UsageLog.tenant_id == t.id, UsageLog.timestamp >= month_start).first()
+
+            last_active_row = db.query(
+                func.max(UsageLog.timestamp).label("last_active"),
+            ).filter(UsageLog.tenant_id == t.id).first()
+
+            # Lifetime count, not month-scoped — a sustained pattern of tier-capping is the upsell signal,
+            # not a count that resets to zero every month regardless of how consistently a client hits it.
+            tier_capped_count = db.query(UsageLog).filter(
+                UsageLog.tenant_id == t.id, UsageLog.was_tier_capped == True
+            ).count()
+
+            billed = float(usage_stats.billed or 0)
+            cogs = float(usage_stats.cogs or 0)
+            base_fee = PLAN_PRICING.get(t.plan_tier, {}).get("base_fee", 0.0)
+            revenue = base_fee + billed
+
+            last_active = last_active_row.last_active
+            churn_risk_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+            churn_risk = last_active is None or last_active < churn_risk_cutoff
+
+            rows.append({
+                "tenant_id": t.id,
+                "plan_tier": t.plan_tier,
+                "is_active": t.is_active,
+                "revenue_this_period": round(revenue, 4),
+                "cogs_this_period": round(cogs, 4),
+                "profit_this_period": round(revenue - cogs, 4),
+                "last_active": last_active.isoformat() if last_active else None,
+                "monthly_budget_cap": t.monthly_budget_cap,
+                "churn_risk": churn_risk,
+                "tier_capped_count": tier_capped_count,
+            })
+
+        rows.sort(key=lambda r: r["profit_this_period"])
+        return {"tenants": rows}
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# SUPER_ADMIN — PLATFORM-WIDE DAILY TIMESERIES (INFRASTRUCTURE TREND)
+# ---------------------------------------------------------
+@app.get("/v1/admin/timeseries")
+async def get_admin_timeseries(days: int = 30, admin: dict = Depends(get_current_admin_user)):
+    db = SessionLocal()
+    try:
+        end_date = datetime.now(timezone.utc).date()
+        start_date = end_date - timedelta(days=days - 1)
+
+        logs = db.query(UsageLog).filter(UsageLog.timestamp >= start_date).all()
+
+        buckets = {
+            (start_date + timedelta(days=i)).isoformat(): {
+                "date": (start_date + timedelta(days=i)).isoformat(),
+                "request_count": 0,
+                "fallback_count": 0,
+            }
+            for i in range(days)
+        }
+
+        for log in logs:
+            key = log.timestamp.date().isoformat()
+            if key in buckets:
+                buckets[key]["request_count"] += 1
+                if log.used_fallback:
+                    buckets[key]["fallback_count"] += 1
+
+        daily = [buckets[k] for k in sorted(buckets.keys())]
+        return {"daily": daily}
     finally:
         db.close()
 
@@ -618,12 +843,45 @@ async def update_tenant_settings(
             tenant_row.routing_mode = update.routing_mode.upper()
         if update.fallback_provider:
             tenant_row.fallback_provider = update.fallback_provider.lower()
+        if update.monthly_budget_cap is not None:
+            tenant_row.monthly_budget_cap = update.monthly_budget_cap
         db.commit()
         return {
             "status": "success",
             "routing_mode": tenant_row.routing_mode,
-            "fallback_provider": tenant_row.fallback_provider
+            "fallback_provider": tenant_row.fallback_provider,
+            "monthly_budget_cap": tenant_row.monthly_budget_cap,
         }
+    finally:
+        db.close()
+
+# ---------------------------------------------------------
+# API KEY ROTATION ENDPOINT
+# ---------------------------------------------------------
+@app.post("/v1/tenant/api-key/rotate")
+async def rotate_api_key(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Missing or invalid authorization header.")
+    try:
+        claims = jwt.decode(auth_header.split(" ")[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=403, detail="Invalid or expired session token.")
+
+    if claims.get("role") != "TENANT_ADMIN":
+        raise HTTPException(status_code=403, detail="Only a tenant admin can rotate the API key.")
+
+    tenant_id = claims.get("tenant_id")
+    db = SessionLocal()
+    try:
+        tenant_row = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if not tenant_row:
+            raise HTTPException(status_code=404, detail="Tenant not found.")
+
+        raw_key = f"sk_live_{secrets.token_hex(16)}"
+        tenant_row.api_key = hash_api_key(raw_key)
+        db.commit()
+        return {"status": "success", "api_key": raw_key}
     finally:
         db.close()
 

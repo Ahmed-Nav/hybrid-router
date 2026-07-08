@@ -41,7 +41,7 @@ export default function Login() {
         router.push("/dashboard");
       } else {
         const errData = await response.json().catch(() => ({ detail: "Authentication Denied" }));
-        setError(errData.detail || "Invalid operator username or password.");
+        setError(errData.detail || "Invalid username or password.");
       }
     } catch (err: any) {
       setError("Connection to API gateway failed. Verify the backend is running.");
@@ -54,7 +54,7 @@ export default function Login() {
     <div className="min-h-screen bg-[#F5F4F0] flex justify-center items-center p-4">
       <div className="bg-white border-4 border-[#1E1E1E] p-8 w-full max-w-md shadow-[8px_8px_0px_#1E1E1E]">
         <h2 className="text-3xl font-extrabold mb-6 font-mono border-b-2 border-gray-100 pb-2">
-          🔐 Operator Login
+          Log In
         </h2>
         
         {error && (
@@ -65,7 +65,7 @@ export default function Login() {
 
         <form onSubmit={handleLogin} className="space-y-4">
           <div>
-            <label className="block text-sm font-bold mb-1">Username / Operator ID</label>
+            <label className="block text-sm font-bold mb-1">Username</label>
             <input 
               type="text" 
               value={username}
@@ -76,7 +76,7 @@ export default function Login() {
             />
           </div>
           <div>
-            <label className="block text-sm font-bold mb-1">Operator Password</label>
+            <label className="block text-sm font-bold mb-1">Password</label>
             <input 
               type="password" 
               value={password}
@@ -91,9 +91,13 @@ export default function Login() {
             disabled={loading}
             className="w-full bg-[#1E1E1E] text-white border-2 border-[#1E1E1E] py-2.5 font-bold hover:bg-[#F28C28] hover:-translate-y-0.5 transition duration-100 disabled:opacity-50"
           >
-            {loading ? "Authenticating Session..." : "Authenticate Platform Session"}
+            {loading ? "Logging in..." : "Log In"}
           </button>
         </form>
+        
+        <div className="mt-4 p-3 bg-[#FFFDF9] border border-[#F28C28] text-xs text-gray-600 font-medium">
+          💡 <strong>Just signed up?</strong> Check your registration inbox (and spam folder) for your onboarding email containing your secure API key and dashboard password.
+        </div>
         
         <div className="mt-6 text-center">
           <a href="/" className="text-sm font-semibold text-[#F28C28] hover:underline">
