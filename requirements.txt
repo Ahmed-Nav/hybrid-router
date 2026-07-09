@@ -10,9 +10,9 @@ sentence-transformers==5.4.1
 presidio-analyzer==2.2.353
 spacy==3.7.4
 numpy<2.0.0
-slowapi
-pyjwt
-twilio
+slowapi==0.1.9
+pyjwt==2.13.0
+twilio==9.10.9
 
 # The Explicit SpaCy Model Download (Bypasses the 404 Bug)
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
@@ -20,7 +20,7 @@ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1
 # API Clients & Environment
 groq==0.37.1
 python-dotenv==1.2.2
-google-genai
+google-genai==2.8.0
 
 #Database
 sqlalchemy==2.0.30

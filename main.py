@@ -7,10 +7,10 @@ import time
 import json
 import secrets
 from fastapi import FastAPI, HTTPException, Security, Depends, Request, BackgroundTasks
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from contextlib import asynccontextmanager
 from sqlalchemy import func
@@ -45,9 +45,10 @@ def get_rate_limit_key(request: Request) -> str:
     api_key = request.headers.get("X-API-Key")
     if api_key:
         return hash_api_key(api_key)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    if os.environ.get("TRUST_PROXY_HEADERS", "").lower() == "true":
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return "127.0.0.1"
@@ -56,12 +57,13 @@ limiter = Limiter(key_func=get_rate_limit_key)
 
 from provider import inference_manager
 import router
-from sanitizer import sanitize_prompt
+from sanitizer import sanitize_prompt, initialize_sanitizer
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🌐 [GATEWAY] Booting Core Systems...")
     router.initialize_router()
+    initialize_sanitizer()
     yield
     print("🛑 [GATEWAY] Offline.")
 
@@ -85,7 +87,7 @@ class Message(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Message]
+    messages: List[Message] = Field(min_length=1)
     temperature: Optional[float] = 0.7
     stream: Optional[bool] = False
 
@@ -104,9 +106,21 @@ class ChangePasswordRequest(BaseModel):
 
 
 # ---------------------------------------------------------
+# SHARED PROVIDER PRICING (single source of truth for both streaming and non-streaming paths)
+# ---------------------------------------------------------
+def compute_provider_cost(actual_provider: str, actual_model: str, p_tokens: int, c_tokens: int) -> float:
+    """Real per-token provider cost (COGS) — used by both the streaming and non-streaming completion paths."""
+    if actual_provider == "groq":
+        if "8b" in actual_model:
+            return (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000
+        return (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
+    return (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
+
+# ---------------------------------------------------------
 # OBSERVABILITY STREAMING GENERATOR ENGINE
 # ---------------------------------------------------------
-async def generate_live_stream(user_prompt: str, target_model: str, target_provider: str, fallback_provider: str, tenant_id: str):
+async def generate_live_stream(user_prompt: str, target_model: str, target_provider: str, fallback_provider: str, tenant_id: str, was_tier_capped: bool = False):
+    planned_provider = target_provider
     try:
         response, actual_provider, actual_model = await inference_manager.get_response(
             model_name=target_model,
@@ -115,14 +129,14 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
             fallback_provider=fallback_provider,
             stream=True
         )
-        
+        request_used_fallback = actual_provider != planned_provider
+
         p_tokens = 0
         c_tokens = 0
-        
+
         async for chunk in response:
             content = ""
             if hasattr(chunk, "choices"):
-                actual_provider = "groq"
                 if getattr(chunk, "usage", None):
                     p_tokens = chunk.usage.prompt_tokens
                     c_tokens = chunk.usage.completion_tokens
@@ -130,13 +144,12 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
                     continue
                 content = chunk.choices[0].delta.content or ""
             else:
-                actual_provider = "gemini"
                 actual_model = "gemini-2.5-flash" if "llama" in target_model else target_model
                 if getattr(chunk, "usage_metadata", None):
                     p_tokens = chunk.usage_metadata.prompt_token_count
                     c_tokens = chunk.usage_metadata.candidates_token_count
                 content = chunk.text or ""
-                
+
             payload = {
                 "id": "chatcmpl-hybrid",
                 "object": "chat.completion.chunk",
@@ -144,14 +157,11 @@ async def generate_live_stream(user_prompt: str, target_model: str, target_provi
                 "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]
             }
             yield f"data: {json.dumps(payload)}\n\n"
-        
-        if actual_provider == "groq":
-            cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in actual_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
-        else:
-            cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
-            
+
+        cost = compute_provider_cost(actual_provider, actual_model, p_tokens, c_tokens)
+
         import asyncio
-        await asyncio.to_thread(log_request, tenant_id, actual_model, p_tokens, c_tokens, cost)
+        await asyncio.to_thread(log_request, tenant_id, actual_model, p_tokens, c_tokens, cost, request_used_fallback, was_tier_capped)
         yield "data: [DONE]\n\n"
     except Exception as e:
         yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -165,11 +175,16 @@ if not JWT_SECRET:
     raise RuntimeError("FATAL: JWT_SECRET environment variable is unset. Cannot start application in a secure state.")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 120
+MAX_PROMPT_CHARS = 20000
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "ACYourTwilioAccountSidHere")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "YourTwilioAuthTokenHere")
 TWILIO_WHATSAPP_FROM = "whatsapp:+14155238886"  # Twilio standard verified sandbox number
-DEVELOPER_WHATSAPP_TO = "whatsapp:+918807387379"  # Replace with your phone number!
+DEVELOPER_WHATSAPP_TO = os.environ.get("DEVELOPER_WHATSAPP_TO", "")
+
+# Constructed once — Twilio's client constructor only stores credentials, it doesn't
+# make a network call, so this is safe even when the credentials are still placeholders.
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # ---------------------------------------------------------
 # OBSERVABILITY UTILITIES (WhatsApp Alerts Engine)
@@ -180,7 +195,11 @@ async def dispatch_system_alert(severity: str, component: str, message: str):
     whenever a primary vendor node fails or a critical cluster incident occurs.
     """
     print(f"🚨 [OBSERVABILITY WARNING] [{severity.upper()}] Component: {component} -> {message}")
-    
+
+    if not DEVELOPER_WHATSAPP_TO:
+        print("⚠️ [OBSERVABILITY EXCEPTION] DEVELOPER_WHATSAPP_TO is not set. Skipping WhatsApp alert.")
+        return
+
     whatsapp_body = (
         f"💥 *[HYBRID ROUTER ALARM]* 💥\n\n"
         f"• *SEVERITY:* `{severity.upper()}`\n"
@@ -190,9 +209,7 @@ async def dispatch_system_alert(severity: str, component: str, message: str):
     )
     
     try:
-        # Initialize Twilio Client Engine locally
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        message_sent = client.messages.create(
+        message_sent = twilio_client.messages.create(
             body=whatsapp_body,
             from_=TWILIO_WHATSAPP_FROM,
             to=DEVELOPER_WHATSAPP_TO
@@ -218,6 +235,23 @@ async def get_authenticated_tenant(key: str = Security(api_key_header)):
     finally:
         db.close()
 
+def decode_bearer_jwt(request: Request) -> Optional[dict]:
+    """Decode a Bearer JWT from the Authorization header, returning None on any failure (missing header, malformed, expired, bad signature)."""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    try:
+        return jwt.decode(auth_header.split(" ")[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+
+def get_jwt_claims(request: Request) -> dict:
+    """Same as decode_bearer_jwt, but raises 403 instead of returning None — for endpoints that require a valid session."""
+    claims = decode_bearer_jwt(request)
+    if claims is None:
+        raise HTTPException(status_code=403, detail="Missing or invalid authorization header.")
+    return claims
+
 async def get_tenant_from_session_or_key(request: Request):
     db = SessionLocal()
     try:
@@ -229,38 +263,26 @@ async def get_tenant_from_session_or_key(request: Request):
             if tenant:
                 db.expunge(tenant)
                 return tenant
-        
+
         # 2. Check Authorization header (Bearer token)
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            token = auth_header.split(" ")[1]
-            try:
-                payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-                tenant_id = payload.get("tenant_id")
-                if tenant_id:
-                    tenant = db.query(Tenant).filter(Tenant.id == tenant_id, Tenant.is_active == True).first()
-                    if tenant:
-                        db.expunge(tenant)
-                        return tenant
-            except jwt.PyJWTError:
-                pass
-                
+        claims = decode_bearer_jwt(request)
+        if claims:
+            tenant_id = claims.get("tenant_id")
+            if tenant_id:
+                tenant = db.query(Tenant).filter(Tenant.id == tenant_id, Tenant.is_active == True).first()
+                if tenant:
+                    db.expunge(tenant)
+                    return tenant
+
         raise HTTPException(status_code=403, detail="Invalid or deactivated credentials.")
     finally:
         db.close()
 
 async def get_current_admin_user(request: Request) -> dict:
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=403, detail="Missing or invalid authorization header.")
-    token = auth_header.split(" ")[1]
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=403, detail="Invalid or expired session token.")
-    if payload.get("role") != "SUPER_ADMIN":
+    claims = get_jwt_claims(request)
+    if claims.get("role") != "SUPER_ADMIN":
         raise HTTPException(status_code=403, detail="This resource requires platform administrator access.")
-    return payload
+    return claims
 
 async def send_provisioning_email(customer_email: str, tenant_id: str, api_key: str, temp_password: str = None):
     resend_api_key = os.environ.get("RESEND_API_KEY")
@@ -489,6 +511,9 @@ async def create_chat_completion(
     if router.sr is None:
         raise HTTPException(status_code=503, detail="AI Core booting...")
 
+    if len(payload.messages[-1].content) > MAX_PROMPT_CHARS:
+        raise HTTPException(status_code=413, detail=f"Prompt exceeds the maximum of {MAX_PROMPT_CHARS} characters.")
+
     user_prompt = sanitize_prompt(payload.messages[-1].content)
     start_time = time.time()
     
@@ -531,11 +556,12 @@ async def create_chat_completion(
     if payload.stream:
         return StreamingResponse(
             generate_live_stream(
-                user_prompt=user_prompt, 
-                target_model=mapping["model"], 
-                target_provider=mapping["provider"], 
+                user_prompt=user_prompt,
+                target_model=mapping["model"],
+                target_provider=mapping["provider"],
                 fallback_provider=tenant.fallback_provider,
-                tenant_id=tenant.id
+                tenant_id=tenant.id,
+                was_tier_capped=request_was_tier_capped
             ), 
             media_type="text/event-stream"
         )
@@ -568,13 +594,13 @@ async def create_chat_completion(
             content = response.choices[0].message.content
             p_tokens = response.usage.prompt_tokens if getattr(response, "usage", None) else 0
             c_tokens = response.usage.completion_tokens if getattr(response, "usage", None) else 0
-            cost = (p_tokens * 0.05 + c_tokens * 0.08) / 1_000_000 if "8b" in actual_model else (p_tokens * 0.59 + c_tokens * 0.79) / 1_000_000
         else:
             content = response.text
             p_tokens = response.usage_metadata.prompt_token_count if getattr(response, "usage_metadata", None) else 0
             c_tokens = response.usage_metadata.candidates_token_count if getattr(response, "usage_metadata", None) else 0
-            cost = (p_tokens * 0.075 + c_tokens * 0.30) / 1_000_000
-            
+
+        cost = compute_provider_cost(actual_provider, actual_model, p_tokens, c_tokens)
+
         print(f"📊 [TELEMETRY STATE] Processing Complete. Overhead: {provider_latency_ms:.2f}ms | Target: {actual_provider.upper()}")
 
         request_used_fallback = actual_provider != planned_provider
@@ -827,10 +853,11 @@ VALID_ROUTING_MODES = {"ECO", "SMART", "PERFORMANCE"}
 VALID_PROVIDERS = {"groq", "gemini"}
 
 @app.patch("/v1/tenant/settings")
-async def update_tenant_settings(
-    update: TenantSettingsUpdate,
-    tenant: Tenant = Depends(get_tenant_from_session_or_key)
-):
+async def update_tenant_settings(request: Request, update: TenantSettingsUpdate):
+    claims = get_jwt_claims(request)
+    if claims.get("role") != "TENANT_ADMIN":
+        raise HTTPException(status_code=403, detail="Only a tenant admin can update tenant settings.")
+
     if update.routing_mode and update.routing_mode.upper() not in VALID_ROUTING_MODES:
         raise HTTPException(status_code=422, detail=f"routing_mode must be one of {sorted(VALID_ROUTING_MODES)}")
     if update.fallback_provider and update.fallback_provider.lower() not in VALID_PROVIDERS:
@@ -838,7 +865,11 @@ async def update_tenant_settings(
 
     db = SessionLocal()
     try:
-        tenant_row = db.query(Tenant).filter(Tenant.id == tenant.id).first()
+        tenant_row = db.query(Tenant).filter(Tenant.id == claims.get("tenant_id")).first()
+        if not tenant_row:
+            raise HTTPException(status_code=404, detail="Tenant not found.")
+        if update.routing_mode and update.routing_mode.upper() == "PERFORMANCE" and tenant_row.plan_tier != "PREMIUM":
+            raise HTTPException(status_code=402, detail="Payment Required: Upgrade to Premium to unlock Performance mode.")
         if update.routing_mode:
             tenant_row.routing_mode = update.routing_mode.upper()
         if update.fallback_provider:
@@ -860,14 +891,7 @@ async def update_tenant_settings(
 # ---------------------------------------------------------
 @app.post("/v1/tenant/api-key/rotate")
 async def rotate_api_key(request: Request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=403, detail="Missing or invalid authorization header.")
-    try:
-        claims = jwt.decode(auth_header.split(" ")[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=403, detail="Invalid or expired session token.")
-
+    claims = get_jwt_claims(request)
     if claims.get("role") != "TENANT_ADMIN":
         raise HTTPException(status_code=403, detail="Only a tenant admin can rotate the API key.")
 
@@ -890,15 +914,8 @@ async def rotate_api_key(request: Request):
 # ---------------------------------------------------------
 @app.post("/v1/auth/change-password")
 async def change_password(payload: ChangePasswordRequest, request: Request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authentication required.")
-
-    try:
-        claims = jwt.decode(auth_header.split(" ")[1], JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        username = claims.get("sub")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+    claims = get_jwt_claims(request)
+    username = claims.get("sub")
 
     if len(payload.new_password) < 8:
         raise HTTPException(status_code=422, detail="New password must be at least 8 characters.")

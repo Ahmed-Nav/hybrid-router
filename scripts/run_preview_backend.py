@@ -20,4 +20,4 @@ os.environ["RAZORPAY_WEBHOOK_SECRET"] = "preview_secret"
 import uvicorn
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=7860, reload=False)

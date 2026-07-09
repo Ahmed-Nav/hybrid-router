@@ -5,7 +5,7 @@
       "name": "backend-preview",
       "runtimeExecutable": "./venv/Scripts/python.exe",
       "runtimeArgs": ["scripts/run_preview_backend.py"],
-      "port": 8000
+      "port": 7860
     },
     {
       "name": "frontend-preview",

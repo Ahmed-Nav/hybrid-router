@@ -119,3 +119,10 @@ def test_change_password(client: TestClient, db_session):
     # Verify new password logins succeed
     login_new = client.post("/v1/auth/login", json={"username": "pwuser", "password": "newpassword123"})
     assert login_new.status_code == 200
+
+def test_change_password_rejects_missing_auth_header(client: TestClient):
+    resp = client.post(
+        "/v1/auth/change-password",
+        json={"current_password": "x", "new_password": "newpassword123"}
+    )
+    assert resp.status_code == 403

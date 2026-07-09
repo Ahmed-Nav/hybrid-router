@@ -519,25 +519,42 @@ export default function Dashboard() {
                 <label className="block text-sm font-extrabold mb-2 uppercase">Mode</label>
                 <div className="space-y-2">
                   {[
-                    { mode: "ECO", desc: "Maximize cost savings — keeps requests on cheaper models" },
-                    { mode: "SMART", desc: "Balanced — automatically picks the right model per request" },
-                    { mode: "PERFORMANCE", desc: "Maximize quality — always uses the top-tier model" },
-                  ].map(({ mode, desc }) => (
-                    <label key={mode} className="flex items-center gap-3 p-2.5 border-2 border-[#1E1E1E] cursor-pointer hover:bg-gray-50">
-                      <input
-                        type="radio"
-                        name="routingMode"
-                        value={mode}
-                        checked={routingMode === mode}
-                        onChange={() => setRoutingMode(mode)}
-                        className="accent-[#F28C28]"
-                      />
-                      <div>
-                        <span className="font-bold">{mode}</span> - <span className="text-sm text-gray-600">{desc}</span>
-                      </div>
-                    </label>
-                  ))}
+                    { mode: "ECO", desc: "Maximize cost savings — keeps requests on cheaper models", premiumOnly: false },
+                    { mode: "SMART", desc: "Balanced — automatically picks the right model per request", premiumOnly: false },
+                    { mode: "PERFORMANCE", desc: "Maximize quality — always uses the top-tier model", premiumOnly: true },
+                  ].map(({ mode, desc, premiumOnly }) => {
+                    const locked = premiumOnly && metrics?.plan_tier !== "PREMIUM";
+                    return (
+                      <label
+                        key={mode}
+                        className={`flex items-center gap-3 p-2.5 border-2 border-[#1E1E1E] ${locked ? "opacity-50 cursor-not-allowed bg-gray-50" : "cursor-pointer hover:bg-gray-50"}`}
+                      >
+                        <input
+                          type="radio"
+                          name="routingMode"
+                          value={mode}
+                          checked={routingMode === mode}
+                          disabled={locked}
+                          onChange={() => !locked && setRoutingMode(mode)}
+                          className="accent-[#F28C28]"
+                        />
+                        <div>
+                          <span className="font-bold">{mode}</span>
+                          {locked ? (
+                            <span className="text-sm text-gray-500"> - 🔒 Requires Premium</span>
+                          ) : (
+                            <span className="text-sm text-gray-600"> - {desc}</span>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
                 </div>
+                {metrics?.plan_tier !== "PREMIUM" && (
+                  <p className="text-xs text-[#F28C28] mt-2 font-semibold">
+                    Upgrade to Premium to unlock Performance mode.
+                  </p>
+                )}
               </div>
 
               <div>
